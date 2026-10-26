@@ -25,7 +25,7 @@ local localPlayer = Players.LocalPlayer
 --------------------------------------------------------------------------------
 -- 2. КОНФИГУРАЦИЯ И СТАТИСТИКА
 --------------------------------------------------------------------------------
-local VERSION = "collector-keygate-2026-10-26.26"
+local VERSION = "collector-keygate-2026-10-26.27"
 local sharedEnvironment = (typeof(getgenv) == "function" and getgenv()) or _G
 local previousRuntime = sharedEnvironment.YBACollectorRuntime
 if previousRuntime and typeof(previousRuntime.Stop) == "function" then pcall(previousRuntime.Stop) end
@@ -2064,26 +2064,28 @@ local function interactWithItem(targetPart: BasePart, prompt: ProximityPrompt, i
         -- One request only: a late server reply must not race retries or departure.
         for attempt = 1, 1 do
             if not active() or gone() or not prompt.Enabled or not inRange() then return false end
+            runtime.PickupHold = {Character = character, Root = hrp, Humanoid = humanoid,
+                Gone = gone, Started = os.clock(), LastLog = os.clock()}
             if not activatePromptSafely(prompt) then return false end
             local requestAt = os.clock()
-            local deadline = requestAt + math.max(2, NetworkTiming.seconds() * 4)
+            local deadline = requestAt + math.max(4, NetworkTiming.seconds() * 8 + NetworkTiming.Jitter * 4)
             print(string.format("[YBA Pickup] Await confirmation RTT=%.3fs timeout=%.2fs", NetworkTiming.seconds(), deadline - requestAt))
             repeat
                 if not active() then return false end
                 if gone() then
+                    runtime.PickupHold = nil
                     STATS.Collected += 1
                     statsSubLabel.Text = string.format("Собрано: %d | Продано партий: %d", STATS.Collected, STATS.SoldBatches)
                     print(string.format("[YBA Pickup] Confirmed disappearance; elapsed=%.3fs; no post-pickup wait", os.clock() - started))
                     return true
                 end
-                deadline = math.min(requestAt + 15, math.max(deadline, requestAt + NetworkTiming.seconds() * 4))
+                deadline = math.min(requestAt + 30, math.max(deadline,
+                    requestAt + NetworkTiming.seconds() * 8 + NetworkTiming.Jitter * 4))
                 task.wait(0.025)
             until os.clock() >= deadline
         end
-        CONFIG.Enabled = false
-        setFarmToggle(false)
-        statusLabel.Text = "Статус: Сбор не подтверждён; остановлено без отлёта"
-        warn(string.format("[YBA Pickup] No server-side disappearance confirmation; stopped in place; RTT=%.3fs", NetworkTiming.seconds()))
+        statusLabel.Text = "Статус: Ожидаем подтверждение подбора; автофарм включён"
+        warn(string.format("[YBA Pickup] Confirmation delayed; holding in place with autofarm enabled; RTT=%.3fs", NetworkTiming.seconds()))
         return false
     end, tracebackError)
     local cleanedOk, cleanupError = pcall(cleanup)
@@ -2091,6 +2093,39 @@ local function interactWithItem(targetPart: BasePart, prompt: ProximityPrompt, i
     if not cleanedOk then warn("[YBA Pickup] Camera cleanup error: " .. tostring(cleanupError)) end
     if not ok then warn("[YBA Pickup] Error: " .. tostring(collected)); return false end
     return collected == true
+end
+
+-- A dispatched pickup owns movement until its result is known; never resend it on a timeout.
+function Farm.waitForPickup(): boolean
+    local hold = runtime.PickupHold
+    if not hold then return false end
+    Farm.setState("AwaitPickup", "awaiting delayed pickup confirmation; no movement or repeated prompt")
+    local sameCharacter = localPlayer.Character == hold.Character and hold.Root.Parent == hold.Character
+        and hold.Humanoid.Parent == hold.Character and hold.Humanoid.Health > 0
+    if not sameCharacter then
+        runtime.PickupHold = nil
+        CONFIG.Enabled = false
+        setFarmToggle(false)
+        statusLabel.Text = "Статус: Сбор остановлен — персонаж погиб или сменился"
+        return true
+    end
+    if hold.Gone() then
+        runtime.PickupHold = nil
+        STATS.Collected += 1
+        statsSubLabel.Text = string.format("Собрано: %d | Продано партий: %d", STATS.Collected, STATS.SoldBatches)
+        Farm.Best, Farm.LastPick = nil, -math.huge
+        Farm.setState("Search", "delayed pickup confirmed -> resume farm")
+        statusLabel.Text = "Статус: Подбор подтверждён; продолжаем фарм"
+        print(string.format("[YBA Pickup] Delayed confirmation after %.2fs; autofarm resumes", os.clock() - hold.Started))
+        return true
+    end
+    statusLabel.Text = "Статус: Ожидаем ответ подбора; автофарм включён (" .. math.floor(os.clock() - hold.Started) .. " с)"
+    if os.clock() - hold.LastLog >= 5 then
+        hold.LastLog = os.clock()
+        print(string.format("[YBA Pickup] Still awaiting confirmation %.2fs RTT=%.3fs; no retry/departure",
+            os.clock() - hold.Started, NetworkTiming.seconds()))
+    end
+    return true
 end
 
 --------------------------------------------------------------------------------
@@ -2640,7 +2675,7 @@ local function executeMerchantState(itemName: string, hrp: BasePart): boolean
         return nil
     end
     local function selectStage(name: string, label: string, delay: number): boolean
-        local option = waitTarget(name, os.clock() + 5)
+        local option = waitTarget(name, os.clock() + math.max(5, NetworkTiming.seconds() * 8 + 2))
         if not option or not active() then return false end
         local button, reason = resolveMerchantTextButton(option)
         if not button then reportPause(label .. ": " .. tostring(reason)); return false end
@@ -2657,9 +2692,9 @@ local function executeMerchantState(itemName: string, hrp: BasePart): boolean
             saleAttempted = true
             log("Option6 appeared and received a confirmed click")
         end
-        if not pause(delay) then return false end
+        if not pause(math.max(delay, NetworkTiming.seconds() * 2 + NetworkTiming.Jitter * 2)) then return false end
         if name ~= "Option6" then return true end
-        local deadline = clickAt + 5
+        local deadline = clickAt + math.max(5, NetworkTiming.seconds() * 8 + 2)
         local reducedAt: number? = nil
         repeat
             if not active() then return false end
@@ -2672,9 +2707,10 @@ local function executeMerchantState(itemName: string, hrp: BasePart): boolean
                     return true
                 end
             else reducedAt = nil end
+            deadline = math.min(clickAt + 45, math.max(deadline, clickAt + NetworkTiming.seconds() * 8 + 2))
             task.wait(0.1)
         until os.clock() >= deadline
-        reportPause("inventory did not decrease within 5 seconds after ALL")
+        reportPause("inventory confirmation delayed after ALL; wait for native release")
         dumpMerchantGui()
         return false
     end
@@ -2853,7 +2889,8 @@ local function executeMerchantState(itemName: string, hrp: BasePart): boolean
         runtime.MerchantBlocked = true
         runtime.MerchantHold = {Character = originalCharacter, Humanoid = originalHumanoid, Root = hrp,
             Health = originalHumanoid.Health, Reason = recoverableReason or "sale not confirmed", ReadySince = nil,
-            ReleasedAt = nil, RequestedSale = requestedSale, ComparisonPause = runtime.ComparisonOccurred == true}
+            ReleasedAt = nil, RequestedSale = requestedSale, ComparisonPause = runtime.ComparisonOccurred == true,
+            PendingItem = saleAttempted and not saleConfirmed and itemName or nil, BeforeCount = beforeCount}
         diagnosticLabel.Text = "Пауза у торговца. Закройте диалог вручную, если он открыт; затем дождитесь кулдауна. Повторных кликов нет."
         statusLabel.Text = "Статус: Пауза у торговца — " .. runtime.MerchantHold.Reason
         log("merchant hold entered; autofarm remains enabled")
@@ -2882,6 +2919,7 @@ runtime.Thread = task.spawn(function()
 
         local loopSuccess, loopError = pcall(function()
             local character, hrp, humanoid = getCharacterParts()
+            if Farm.waitForPickup() then return end
 
             -- No patrol, prompts, tool equips or retries while a merchant hold exists.
             if runtime.MerchantBlocked and not runtime.MerchantHold and hrp and humanoid then
@@ -2906,6 +2944,18 @@ runtime.Thread = task.spawn(function()
                     return
                 end
                 hold.Health = humanoid.Health
+                if hold.PendingItem then
+                    local count = getItemCount(hold.PendingItem)
+                    if count >= hold.BeforeCount then
+                        statusLabel.Text = "Статус: Ожидаем списание после продажи; автофарм включён"
+                        return
+                    end
+                    print(string.format("[YBA Merchant] Delayed sale confirmed item=%s before=%d after=%d",
+                        hold.PendingItem, hold.BeforeCount, count))
+                    hold.PendingItem = nil
+                    STATS.SoldBatches += 1
+                    statsSubLabel.Text = string.format("Собрано: %d | Продано партий: %d", STATS.Collected, STATS.SoldBatches)
+                end
                 if hold.ComparisonPause then
                     statusLabel.Text = "Статус: Пауза — сравнение завершено; остановите автофарм и сохраните F9"
                     task.wait(0.2)
@@ -2983,10 +3033,14 @@ runtime.Thread = task.spawn(function()
                                     or humanoid.WalkSpeed <= 0
                             end
                             if not outside or not moveToTargetVelocity(hrp, outside, cancelDeparture, true) then
-                                CONFIG.Enabled = false
-                                setFarmToggle(false)
-                                statusLabel.Text = "Статус: Выход от торговца не подтверждён; остановлено"
-                                warn("[YBA Movement] Merchant departure interrupted; no Instant flight started")
+                                if CONFIG.Enabled and runtime.Running and localPlayer.Character == character and humanoid.Health > 0 then
+                                    runtime.MerchantBlocked = true
+                                    runtime.MerchantHold = {Character = character, Humanoid = humanoid, Root = hrp,
+                                        Health = humanoid.Health, Reason = "выход от торговца задержан", ReadySince = nil,
+                                        ReleasedAt = nil, RequestedSale = false}
+                                    statusLabel.Text = "Статус: Пауза у торговца; автофарм включён"
+                                end
+                                warn("[YBA Movement] Merchant departure pending; no toggle change or Instant flight")
                                 return
                             end
                             runtime.MerchantDeparture = nil
@@ -3058,6 +3112,7 @@ runtime.Thread = task.spawn(function()
             statusLabel.TextColor3 = THEME.Success
             -- Preserve the complete pickup transaction, including the 0.35s physics delay.
             interactWithItem(target.Part, target.Prompt, target.Root)
+            if runtime.PickupHold or not CONFIG.Enabled then return end
             Farm.Best, Farm.LastPick = nil, -math.huge
             local nextTarget, remaining = Farm.nearby(hrp.Position)
             if nextTarget then

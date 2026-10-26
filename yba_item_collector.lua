@@ -25,7 +25,7 @@ local localPlayer = Players.LocalPlayer
 --------------------------------------------------------------------------------
 -- 2. КОНФИГУРАЦИЯ И СТАТИСТИКА
 --------------------------------------------------------------------------------
-local VERSION = "collector-keygate-2026-10-26.21"
+local VERSION = "collector-keygate-2026-10-26.26"
 local sharedEnvironment = (typeof(getgenv) == "function" and getgenv()) or _G
 local previousRuntime = sharedEnvironment.YBACollectorRuntime
 if previousRuntime and typeof(previousRuntime.Stop) == "function" then pcall(previousRuntime.Stop) end
@@ -45,7 +45,7 @@ print("[YBA Debug] Version " .. VERSION)
 local CONFIG = {
     Enabled = false,               -- Главный переключатель автофарма
     MoveMode = "Stealth Velocity", -- "Stealth Velocity" или "Instant Teleport"
-    Speed = 40,                    -- Скорость полета (20 - 150 studs/s)
+    Speed = 40,                    -- Скорость полета (20 - 350 studs/s)
     Radius = 5000,                 -- Радиус поиска (по умолчанию 5000 - вся карта)
     NearbyRadius = 100,            -- Сначала очистить ближайшую группу предметов
     ScanDelay = 0.1,               -- Пауза при пустом поиске
@@ -112,7 +112,7 @@ function Settings.load()
     if typeof(data) ~= "table" or data.Version ~= 1 then Settings.report("Формат настроек не поддерживается; используются значения по умолчанию"); return end
     Settings.Data = data
     if data.MoveMode == "Stealth Velocity" or data.MoveMode == "Instant Teleport" then CONFIG.MoveMode = data.MoveMode end
-    if Settings.finite(data.Speed) then CONFIG.Speed = math.clamp(math.floor(data.Speed), 20, 150) end
+    if Settings.finite(data.Speed) then CONFIG.Speed = math.clamp(math.floor(data.Speed), 20, 350) end
     if Settings.finite(data.Radius) then CONFIG.Radius = math.clamp(math.floor(data.Radius), 50, 5000) end
     if Settings.finite(data.NearbyRadius) then CONFIG.NearbyRadius = math.clamp(math.floor(data.NearbyRadius), 10, 5000) end
     if typeof(data.AimCamera) == "boolean" then CONFIG.AimCamera = data.AimCamera end
@@ -177,17 +177,70 @@ function Settings.requestSave()
 end
 Settings.load()
 
+-- Sample on demand, including during flights and transactions; never assume a fixed RTT.
+local NetworkTiming = {LastSample = -math.huge, RTT = 0.2, Jitter = 0, Previous = nil,
+    StableSince = nil, StepWait = 0.075, CorrectionAt = -math.huge, Corrections = 0,
+    FallbackUntil = 0, RecoveryPending = false}
+function NetworkTiming.seconds(): number
+    if os.clock() - NetworkTiming.LastSample >= 0.1 then
+        NetworkTiming.LastSample = os.clock()
+        local ok, milliseconds = pcall(function()
+            return Stats.Network.ServerStatsItem["Data Ping"]:GetValue()
+        end)
+        if ok and Settings.finite(milliseconds) and milliseconds >= 0 then
+            local sample = math.clamp(milliseconds / 1000, 0.02, 5)
+            local change = NetworkTiming.Previous and math.abs(sample - NetworkTiming.Previous) or 0
+            NetworkTiming.Previous = sample
+            NetworkTiming.Jitter = math.max(change, NetworkTiming.Jitter * 0.85)
+            if sample <= 0.12 and NetworkTiming.Jitter <= 0.03 then
+                NetworkTiming.StableSince = NetworkTiming.StableSince or os.clock()
+            else
+                NetworkTiming.StableSince = nil
+            end
+            -- React immediately to spikes; decay slowly when the connection improves.
+            NetworkTiming.RTT = math.max(sample, NetworkTiming.RTT * 0.85)
+        else
+            NetworkTiming.RTT = math.max(NetworkTiming.RTT, 0.5)
+            NetworkTiming.StableSince = nil
+        end
+    end
+    return NetworkTiming.RTT
+end
+function NetworkTiming.speed(): number
+    local rtt = NetworkTiming.seconds()
+    return math.clamp(CONFIG.Speed, 20, 350) / math.max(1, (rtt + NetworkTiming.Jitter) / 0.15)
+end
+function NetworkTiming.stepDelay(distance: number): number
+    local rtt = NetworkTiming.seconds()
+    local stable = NetworkTiming.StableSince and os.clock() - NetworkTiming.StableSince >= 3
+        and os.clock() - NetworkTiming.CorrectionAt >= 10
+    local desired = math.max(stable and 0.05 or 0.075, distance / NetworkTiming.speed(), rtt * 0.5 + NetworkTiming.Jitter)
+    -- Increase immediately; shorten gradually only after sustained stable samples.
+    NetworkTiming.StepWait = math.max(desired, NetworkTiming.StepWait * 0.9)
+    return NetworkTiming.StepWait
+end
+function NetworkTiming.corrected()
+    local now = os.clock()
+    NetworkTiming.Corrections = now - NetworkTiming.CorrectionAt <= 120 and NetworkTiming.Corrections + 1 or 1
+    NetworkTiming.CorrectionAt, NetworkTiming.StableSince = now, nil
+    local cooldown = NetworkTiming.Corrections >= 2 and 60 or 15
+    NetworkTiming.FallbackUntil, NetworkTiming.RecoveryPending = now + cooldown, true
+    warn(string.format("[YBA Movement] Position correction #%d; velocity fallback for %ds; RTT=%.3f jitter=%.3f",
+        NetworkTiming.Corrections, cooldown, NetworkTiming.RTT, NetworkTiming.Jitter))
+end
+
 local Sales = {Order = {}, Aliases = {}, LastScan = -math.huge, Counts = {}, Unknown = {}, UnknownCount = 0, AddRow = nil}
 -- Thresholds trigger a sale; they are not claims about the account's maximum capacity.
 Sales.Catalog = {
-    {"Mysterious Arrow", 25, {"Stand Arrow"}},
+    {"Mysterious Arrow", 25, {}},
     {"Rokakaka", 25, {"Rokakaka Fruit"}},
     {"Gold Coin", 25, {}}, {"Diamond", 25, {}},
-    {"Vampire Mask", 10, {}}, {"Quinton's Glove", 10, {"Quintons Glove"}},
+    {"Quinton's Glove", 10, {"Quintons Glove"}},
     {"Pure Rokakaka", 10, {"Pure Rokakaka Fruit"}},
     {"Rib Cage of the Saint's Corpse", 10, {"Ribcage of the Saint's Corpse", "Rib Cage", "Ribcage"}},
     {"Ancient Scroll", 10, {}},
     {"Zepellin's Headband", 10, {"Zeppelin's Headband", "Zeppeli's Headband", "Zepelli's Headband"}},
+    {"Zeppeli's Hat", 10, {"Zepelli's Hat", "Zeppelli's Hat", "Zeppelis Hat"}},
     {"Clackers", 10, {}}, {"Stone Mask", 10, {}}, {"Candy", 50, {}},
     {"Steel Ball", 10, {}}, {"Caesar's Headband", 10, {}}, {"Dio's Headband", 10, {"DEO's Headband"}},
     {"Dio's Diary", 10, {"DEO's Diary"}}, {"Green Baby", 10, {}},
@@ -207,7 +260,9 @@ function Sales.normalize(name: string): string
     return string.lower(clean):gsub("[^%w]", "")
 end
 function Sales.protected(name: string): boolean
-    return string.find(Sales.normalize(name), "lucky", 1, true) ~= nil
+    local normalized = Sales.normalize(name)
+    return normalized == "standarrow" or normalized == "vampiremask"
+        or string.find(normalized, "lucky", 1, true) ~= nil
 end
 function Sales.add(name: string, threshold: number, aliases: {string})
     if Sales.protected(name) or CONFIG.Limits[name] then return end
@@ -215,7 +270,9 @@ function Sales.add(name: string, threshold: number, aliases: {string})
     CONFIG.SellItems[name], CONFIG.Limits[name] = true, threshold
     Settings.applySale(name)
     Sales.Aliases[Sales.normalize(name)] = name
-    for _, alias in ipairs(aliases) do Sales.Aliases[Sales.normalize(alias)] = name end
+    for _, alias in ipairs(aliases) do
+        if not Sales.protected(alias) then Sales.Aliases[Sales.normalize(alias)] = name end
+    end
     if Sales.AddRow then Sales.AddRow(name, CONFIG.Limits[name], #Sales.Order) end
 end
 for _, definition in ipairs(Sales.Catalog) do Sales.add(definition[1], definition[2], definition[3]) end
@@ -840,7 +897,7 @@ connectOwned(modeBtn.MouseButton1Click, function()
     Settings.requestSave()
 end)
 
--- 3. Слайдер скорости (20 - 150)
+-- 3. Слайдер скорости (20 - 350)
 local speedCard = Instance.new("Frame")
 speedCard.Size = UDim2.new(1, 0, 0, 60)
 speedCard.BackgroundColor3 = THEME.CardBg
@@ -886,7 +943,7 @@ speedTrackCorner.CornerRadius = UDim.new(1, 0)
 speedTrackCorner.Parent = speedTrack
 
 local speedFill = Instance.new("Frame")
-local defSpeedRatio = math.clamp((CONFIG.Speed - 20) / (150 - 20), 0, 1)
+local defSpeedRatio = math.clamp((CONFIG.Speed - 20) / (350 - 20), 0, 1)
 speedFill.Size = UDim2.new(defSpeedRatio, 0, 1, 0)
 speedFill.BackgroundColor3 = THEME.Accent
 speedFill.BorderSizePixel = 0
@@ -1197,7 +1254,7 @@ local isSpeedMoving = false
 local function handleSpeed(frac: number)
     frac = math.clamp(frac, 0, 1)
     TweenService:Create(speedFill, TweenInfo.new(0.04), { Size = UDim2.new(frac, 0, 1, 0) }):Play()
-    local val = math.floor(20 + frac * (150 - 20))
+    local val = math.floor(20 + frac * (350 - 20))
     CONFIG.Speed = val
     speedIndicator.Text = tostring(val) .. " studs/s"
     Settings.requestSave()
@@ -1400,14 +1457,30 @@ local function moveToTargetVelocity(hrp: BasePart, targetPos: Vector3, cancelReq
     local moveCharacter = hrp.Parent
     local cancelled = false
     local function shouldCancel(): boolean
-        if not cancelRequested then return false end
         local owner = hrp.Parent
         local humanoid = owner and owner:FindFirstChildOfClass("Humanoid")
-        cancelled = not runtime.Running or not CONFIG.Enabled or localPlayer.Character ~= owner
-            or not humanoid or humanoid.Health <= 0 or cancelRequested()
+        cancelled = cancelled or not runtime.Running or not CONFIG.Enabled or owner ~= moveCharacter
+            or localPlayer.Character ~= moveCharacter or not humanoid or humanoid.Health <= 0
+            or (cancelRequested ~= nil and cancelRequested())
         return cancelled
     end
     if shouldCancel() then return false end
+    if NetworkTiming.RecoveryPending then
+        local reference, stableSince = hrp.Position, os.clock()
+        local deadline = os.clock() + math.max(3, NetworkTiming.seconds() * 5)
+        repeat
+            if shouldCancel() then return false end
+            if (hrp.Position - reference).Magnitude > 1 then
+                reference, stableSince = hrp.Position, os.clock()
+            end
+            if os.clock() - stableSince >= math.max(0.5, NetworkTiming.seconds() * 2) then
+                NetworkTiming.RecoveryPending = false
+                break
+            end
+            task.wait(0.05)
+        until os.clock() >= deadline
+        if NetworkTiming.RecoveryPending then return false end
+    end
     if CONFIG.MoveMode == "Instant Teleport" and not forceVelocity and not cancelRequested and Farm.State == "Selling" then
         if (hrp.Position - targetPos).Magnitude > 10 or math.abs(hrp.Position.Y - targetPos.Y) > CONFIG.ArrivalTolerance then
             local staging = Farm.merchantStage(hrp, targetPos)
@@ -1418,6 +1491,7 @@ local function moveToTargetVelocity(hrp: BasePart, targetPos: Vector3, cancelReq
             print("[YBA Movement] Instant merchant staging=" .. tostring(staging) .. " NPC target=" .. tostring(targetPos))
             -- A non-nil cancellation predicate prevents recursion into the merchant approach.
             if not moveToTargetVelocity(hrp, staging, function() return false end) then return false end
+            runtime.MerchantDeparture = {Character = hrp.Parent, Position = staging}
         end
         local owner = hrp.Parent
         local humanoid = owner and owner:FindFirstChildOfClass("Humanoid")
@@ -1432,8 +1506,11 @@ local function moveToTargetVelocity(hrp: BasePart, targetPos: Vector3, cancelReq
         return true
     end
 
-    -- РЕЖИМ 2: INSTANT TELEPORT (Адаптивный пошаговый телепорт сверху карты + Пинг-контроллер)
-    if CONFIG.MoveMode == "Instant Teleport" and not forceVelocity then
+    local flightDistance = (targetPos - hrp.Position).Magnitude
+    local useInstant = CONFIG.MoveMode == "Instant Teleport" and not forceVelocity
+        and flightDistance > 24 and os.clock() >= NetworkTiming.FallbackUntil
+    -- Nearby targets avoid ascent/descent overhead; corrections temporarily select velocity.
+    if useInstant then
         isFlying = true
 
         for _, obj in ipairs(hrp:GetChildren()) do
@@ -1463,76 +1540,47 @@ local function moveToTargetVelocity(hrp: BasePart, targetPos: Vector3, cancelReq
         antiFall.Velocity = Vector3.zero
         antiFall.Parent = hrp
 
-        -- Динамический контроллер пинга: непрерывное считывание задержки сети
-        local currentPingMs = 50
-        pcall(function()
-            local netStats = Stats:FindFirstChild("Network")
-            if netStats then
-                local serverStats = netStats:FindFirstChild("ServerStatsItem")
-                if serverStats then
-                    local pingItem = serverStats:FindFirstChild("Data Ping") :: any
-                    if pingItem and typeof(pingItem.GetValue) == "function" then
-                        currentPingMs = pingItem:GetValue()
-                    end
-                end
-            end
-        end)
-
-        -- [ФИКС АНТИЧЕТА И ОТКАТОВ]:
-        -- Уменьшенный безопасный шаг (16 стадсов, 12 при высоком пинге > 100мс)
-        -- и достаточная задержка между шагами (0.05с / 0.075с), что укладывает
-        -- скорость перемещения в допустимые серверные лимиты античета YBA.
-        local isHighPing = currentPingMs > 100
-        local segmentLength = isHighPing and 12 or 16
-        local stepWait = isHighPing and 0.075 or 0.05
-
         local platform = getStealthPlatform()
-
         local startPos = hrp.Position
-        -- Безопасная высота СВЕРХУ карты (targetPos.Y + 3.5), строго без занижения Y!
-        local safeAirY = math.max(startPos.Y, targetPos.Y) + 3.5
-
-        -- Шаг 1: Подъем на безопасную высоту сверху с невидимой платформой под ногами
-        hrp.Velocity = Vector3.new(0, 0, 0)
-        if not shouldCancel() then hrp.CFrame = CFrame.new(startPos.X, safeAirY, startPos.Z) end
-        if platform and platform.Parent == Workspace then
-            platform.CFrame = CFrame.new(startPos.X, safeAirY - 2.8, startPos.Z)
+        -- Reuse existing altitude instead of adding 3.5 studs above every starting point.
+        local safeAirY = math.max(startPos.Y, targetPos.Y + 3.5)
+        local expected = startPos
+        local rotation = hrp.CFrame.Rotation
+        local correctionThreshold = 6
+        local function positionMatches(): boolean
+            if (hrp.Position - expected).Magnitude <= correctionThreshold then return true end
+            cancelled = true
+            NetworkTiming.corrected()
+            statusLabel.Text = "Статус: Коррекция позиции; временно Stealth Velocity"
+            return false
         end
-        task.wait(stepWait)
-
-        -- Шаг 2: Пошаговое движение сверху безопасными отрезками с поддержкой платформы
-        local airStart = Vector3.new(startPos.X, safeAirY, startPos.Z)
-        local airTarget = Vector3.new(targetPos.X, safeAirY, targetPos.Z)
-        local totalDist = (airTarget - airStart).Magnitude
-
-        local stepCount = math.max(1, math.ceil(totalDist / segmentLength))
-
-        for step = 1, stepCount do
-            if shouldCancel() or not hrp or not hrp.Parent or not CONFIG.Enabled then break end
-            local alpha = step / stepCount
-            local currentStepPos = airStart:Lerp(airTarget, alpha)
-
-            -- Синхронизация платформы под ногами на каждом шаге (валидация стояния на опоре для сервера)
-            if platform and platform.Parent == Workspace then
-                platform.CFrame = CFrame.new(currentStepPos.X, currentStepPos.Y - 2.8, currentStepPos.Z)
+        local function advance(destination: Vector3): boolean
+            while (destination - expected).Magnitude > 0.05 do
+                if shouldCancel() or not positionMatches() then return false end
+                local delta = destination - expected
+                local segmentLength = NetworkTiming.seconds() > 0.1 and 12 or 16
+                local stepDistance = math.min(segmentLength, delta.Magnitude)
+                local nextPosition = expected + delta.Unit * stepDistance
+                if platform and platform.Parent == Workspace then
+                    platform.CFrame = CFrame.new(nextPosition - Vector3.new(0, 2.8, 0))
+                end
+                hrp.AssemblyLinearVelocity, hrp.AssemblyAngularVelocity = Vector3.zero, Vector3.zero
+                hrp.CFrame = CFrame.new(nextPosition) * rotation
+                expected = nextPosition
+                task.wait(NetworkTiming.stepDelay(stepDistance))
+                -- Check the final step too; never snap to a target after cancellation/correction.
+                if shouldCancel() or not positionMatches() then return false end
             end
-
-            -- Обнуление импульса и аккуратная фиксация CFrame
-            hrp.Velocity = Vector3.new(0, 0, 0)
-            hrp.CFrame = CFrame.new(currentStepPos)
-            task.wait(stepWait)
+            return not shouldCancel() and positionMatches()
         end
-
-        if not cancelled and not shouldCancel() and hrp.Parent and CONFIG.Enabled then
-        -- Шаг 3: Точный спуск к целевой точке (targetPos)
-        local currentLook = hrp.CFrame.LookVector
-        if platform and platform.Parent == Workspace then
-            platform.CFrame = CFrame.new(targetPos.X, targetPos.Y - 2.8, targetPos.Z)
-        end
-        hrp.Velocity = Vector3.new(0, 0, 0)
-        hrp.CFrame = CFrame.new(targetPos, targetPos + Vector3.new(currentLook.X, 0, currentLook.Z))
-        task.wait(stepWait)
-
+        local flightOk, arrived = xpcall(function(): boolean
+            return advance(Vector3.new(startPos.X, safeAirY, startPos.Z))
+                and advance(Vector3.new(targetPos.X, safeAirY, targetPos.Z))
+                and advance(targetPos)
+        end, tracebackError)
+        if not flightOk then
+            cancelled = true
+            warn("[YBA Movement] Instant flight error: " .. tostring(arrived))
         end
 
         -- Восстановление гравитации и видимости
@@ -1550,7 +1598,7 @@ local function moveToTargetVelocity(hrp: BasePart, targetPos: Vector3, cancelReq
             removeStealthPlatform()
             if hrp.Parent then hrp.AssemblyLinearVelocity = Vector3.zero end
         end
-        return not cancelled
+        return flightOk and arrived == true and not cancelled
     end
 
     -- РЕЖИМ 1: STEALTH VELOCITY
@@ -1577,11 +1625,12 @@ local function moveToTargetVelocity(hrp: BasePart, targetPos: Vector3, cancelReq
 
     local platform = getStealthPlatform()
     local distance = (targetPos - hrp.Position).Magnitude
-    local speed = math.max(CONFIG.Speed, 20)
-    local maxFlightTime = (distance / speed) + 4.5
+    local speed = NetworkTiming.speed()
+    local maxFlightTime = (distance / math.max(1, speed * 0.25)) + 4.5
     local startTime = os.clock()
     local arrived = false
 
+    local flightOk, flightError = xpcall(function()
     while (os.clock() - startTime) < maxFlightTime do
         if shouldCancel() or not hrp or not hrp.Parent or not CONFIG.Enabled or not runtime.Running then break end
 
@@ -1595,6 +1644,7 @@ local function moveToTargetVelocity(hrp: BasePart, targetPos: Vector3, cancelReq
         end
 
         local direction = delta.Unit
+        speed = NetworkTiming.speed()
         bv.Velocity = direction * math.min(speed, curDist * 4)
         bg.CFrame = CFrame.new(currentPos, currentPos + Vector3.new(direction.X, 0, direction.Z))
 
@@ -1604,12 +1654,22 @@ local function moveToTargetVelocity(hrp: BasePart, targetPos: Vector3, cancelReq
 
         RunService.Heartbeat:Wait()
     end
+    end, tracebackError)
+    if not flightOk then
+        cancelled = true
+        warn("[YBA Movement] Velocity flight error: " .. tostring(flightError))
+    end
 
     bv.Velocity = Vector3.zero
-    task.wait(0.08)
+    if cancelRequested and not forceVelocity and not cancelled then
+        RunService.Heartbeat:Wait()
+    else
+        task.wait(0.08)
+    end
 
     pcall(function() bv:Destroy() end)
     pcall(function() bg:Destroy() end)
+    isFlying = false
 
     if platform and platform.Parent == Workspace then
         platform.CFrame = CFrame.new(hrp.Position.X, hrp.Position.Y - 2.8, hrp.Position.Z)
@@ -1620,7 +1680,7 @@ local function moveToTargetVelocity(hrp: BasePart, targetPos: Vector3, cancelReq
         removeStealthPlatform()
         if hrp.Parent then hrp.AssemblyLinearVelocity = Vector3.zero end
     end
-    task.wait(0.2)
+    if not cancelRequested or forceVelocity then task.wait(0.2) end
     return arrived and not cancelled
 end
 
@@ -1995,16 +2055,19 @@ local function interactWithItem(targetPart: BasePart, prompt: ProximityPrompt, i
             end
         end
         -- Required physics synchronization is retained, independently of camera aiming.
-        local synchronizeUntil = os.clock() + 0.35
+        local synchronizeUntil = os.clock() + math.max(0.35, NetworkTiming.seconds() * 2)
         repeat
             if not active() or gone() then return false end
             task.wait(0.01)
         until os.clock() >= synchronizeUntil
         if not inRange() then return false end
-        for attempt = 1, 3 do
+        -- One request only: a late server reply must not race retries or departure.
+        for attempt = 1, 1 do
             if not active() or gone() or not prompt.Enabled or not inRange() then return false end
             if not activatePromptSafely(prompt) then return false end
-            local deadline = os.clock() + 0.25
+            local requestAt = os.clock()
+            local deadline = requestAt + math.max(2, NetworkTiming.seconds() * 4)
+            print(string.format("[YBA Pickup] Await confirmation RTT=%.3fs timeout=%.2fs", NetworkTiming.seconds(), deadline - requestAt))
             repeat
                 if not active() then return false end
                 if gone() then
@@ -2013,11 +2076,14 @@ local function interactWithItem(targetPart: BasePart, prompt: ProximityPrompt, i
                     print(string.format("[YBA Pickup] Confirmed disappearance; elapsed=%.3fs; no post-pickup wait", os.clock() - started))
                     return true
                 end
+                deadline = math.min(requestAt + 15, math.max(deadline, requestAt + NetworkTiming.seconds() * 4))
                 task.wait(0.025)
             until os.clock() >= deadline
         end
-        if itemInstance and itemInstance:IsDescendantOf(Workspace) then itemBlacklist[itemInstance] = true end
-        warn("[YBA Pickup] No collection confirmation after 3 attempts; target skipped")
+        CONFIG.Enabled = false
+        setFarmToggle(false)
+        statusLabel.Text = "Статус: Сбор не подтверждён; остановлено без отлёта"
+        warn(string.format("[YBA Pickup] No server-side disappearance confirmation; stopped in place; RTT=%.3fs", NetworkTiming.seconds()))
         return false
     end, tracebackError)
     local cleanedOk, cleanupError = pcall(cleanup)
@@ -2615,25 +2681,31 @@ local function executeMerchantState(itemName: string, hrp: BasePart): boolean
     local function waitForNativeRelease(): boolean
         local releaseStarted = os.clock()
         stage = "native-dialogue-exit"
-        local deadline = os.clock() + 7
+        local deadline = os.clock() + math.max(7, NetworkTiming.seconds() * 4 + 2)
         local exitClicked = false
         local stableSince: number? = nil
+        local stablePosition = hrp.Position
         repeat
             if not active() then return false end
             local visible = isMerchantDialogueVisible()
             if not visible and originalHumanoid.WalkSpeed > 0 and not hrp.Anchored
                 and not originalHumanoid.PlatformStand and not originalHumanoid.Sit then
+                if (hrp.Position - stablePosition).Magnitude > 1 then
+                    stablePosition, stableSince = hrp.Position, nil
+                end
                 stableSince = stableSince or os.clock()
-                if os.clock() - stableSince >= 0.35 then
+                local settleSeconds = math.max(0.75, NetworkTiming.seconds() * 3)
+                if os.clock() - stableSince >= settleSeconds then
                     runtime.MerchantBlocked = false
                     log(string.format("native release confirmed elapsed=%.3fs; no character state was forced", os.clock() - releaseStarted))
                     return true
                 end
             else
                 stableSince = nil
+                stablePosition = hrp.Position
             end
             -- Give a completed transaction 0.3 seconds to close the GUI naturally.
-            if visible and not exitClicked and os.clock() >= deadline - 6.7 then
+            if visible and not exitClicked and os.clock() - releaseStarted >= 0.3 then
                 local exit: GuiObject? = nil
                 if saleConfirmed then
                     local containers = getMerchantOptionContainers()
@@ -2901,6 +2973,25 @@ runtime.Thread = task.spawn(function()
                     local sold = executeMerchantState(itemToSell, hrp)
                     if sold and wasFullSale and CONFIG.Enabled and runtime.Running
                         and localPlayer.Character == character and humanoid.Health > 0 and not runtime.MerchantBlocked then
+                        -- Retrace the final approach before any Instant ascent inside the building.
+                        local departure = runtime.MerchantDeparture
+                        if CONFIG.MoveMode == "Instant Teleport" and not getFullItemName() then
+                            local outside = departure and departure.Character == character and departure.Position
+                                or Farm.merchantStage(hrp, hrp.Position)
+                            local function cancelDeparture(): boolean
+                                return localPlayer.Character ~= character or humanoid.Health <= 0 or isMerchantDialogueVisible()
+                                    or humanoid.WalkSpeed <= 0
+                            end
+                            if not outside or not moveToTargetVelocity(hrp, outside, cancelDeparture, true) then
+                                CONFIG.Enabled = false
+                                setFarmToggle(false)
+                                statusLabel.Text = "Статус: Выход от торговца не подтверждён; остановлено"
+                                warn("[YBA Movement] Merchant departure interrupted; no Instant flight started")
+                                return
+                            end
+                            runtime.MerchantDeparture = nil
+                            print("[YBA Movement] Merchant departure complete; Instant travel may resume")
+                        end
                         Farm.Best, Farm.LastPick = nil, -math.huge
                         Farm.setState("Search", "sale completed -> fresh scan; next full inventory batch remains eligible")
                         statusLabel.Text = "Статус: Продажа завершена; поиск предметов..."

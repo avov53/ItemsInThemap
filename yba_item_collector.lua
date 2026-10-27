@@ -25,10 +25,12 @@ local localPlayer = Players.LocalPlayer
 --------------------------------------------------------------------------------
 -- 2. КОНФИГУРАЦИЯ И СТАТИСТИКА
 --------------------------------------------------------------------------------
-local VERSION = "collector-keygate-2026-10-26.27"
+local VERSION = "collector-halloween-2026-10-27.28"
 local sharedEnvironment = (typeof(getgenv) == "function" and getgenv()) or _G
 local previousRuntime = sharedEnvironment.YBACollectorRuntime
 if previousRuntime and typeof(previousRuntime.Stop) == "function" then pcall(previousRuntime.Stop) end
+local previewRuntime=sharedEnvironment.YBAUIPreview
+if previewRuntime and typeof(previewRuntime.Stop)=="function" then pcall(previewRuntime.Stop) end
 local runtime = {Running = true, Connections = {}, Cleanup = nil}
 sharedEnvironment.YBACollectorRuntime = runtime
 local function connectOwned(signal: RBXScriptSignal, callback: any): RBXScriptConnection
@@ -75,6 +77,7 @@ local CONFIG = {
     },
 
     -- Populated from the shared sellable-item catalog below.
+    UI = {Theme="Halloween", Accent=nil, Glass=86, ReducedMotion=false},
     SellItems = {},
     Limits = {},
 }
@@ -116,6 +119,13 @@ function Settings.load()
     if Settings.finite(data.Radius) then CONFIG.Radius = math.clamp(math.floor(data.Radius), 50, 5000) end
     if Settings.finite(data.NearbyRadius) then CONFIG.NearbyRadius = math.clamp(math.floor(data.NearbyRadius), 10, 5000) end
     if typeof(data.AimCamera) == "boolean" then CONFIG.AimCamera = data.AimCamera end
+    if typeof(data.UI)=="table" then
+        local appearance=data.UI
+        if appearance.Theme=="Halloween" or appearance.Theme=="Dark" or appearance.Theme=="Light" then CONFIG.UI.Theme=appearance.Theme end
+        if typeof(appearance.Accent)=="string" and appearance.Accent:match("^#%x%x%x%x%x%x$") then CONFIG.UI.Accent=string.upper(appearance.Accent) end
+        if Settings.finite(appearance.Glass) then CONFIG.UI.Glass=math.clamp(math.floor(appearance.Glass),65,96) end
+        if typeof(appearance.ReducedMotion)=="boolean" then CONFIG.UI.ReducedMotion=appearance.ReducedMotion end
+    end
     CONFIG.Enabled = false
     print("[YBA Settings] Loaded " .. Settings.Path .. "; auto farm starts disabled")
 end
@@ -152,7 +162,7 @@ function Settings.capture(): any
         and Settings.finite(auth.Revision) and auth.Revision >= 1 and auth.Revision == math.floor(auth.Revision) then
         savedAuth = {Key = auth.Key, Revision = auth.Revision}
     end
-    return {Version = 1, Auth = savedAuth, MoveMode = CONFIG.MoveMode, Speed = CONFIG.Speed, Radius = CONFIG.Radius,
+    return {Version = 1, Auth = savedAuth, UI = table.clone(CONFIG.UI), MoveMode = CONFIG.MoveMode, Speed = CONFIG.Speed, Radius = CONFIG.Radius,
         NearbyRadius = CONFIG.NearbyRadius, AimCamera = CONFIG.AimCamera, SellItems = sellItems, Limits = limits}
 end
 function Settings.flush(): boolean
@@ -416,6 +426,901 @@ local function getGuiContainer(): Instance
     return localPlayer:WaitForChild("PlayerGui")
 end
 
+local function buildCollectorUI(options: any): any
+local Input=UserInputService
+local player=localPlayer
+-- Bindings store color roles rather than captured colors, so changing a theme
+-- updates the existing controls without rebuilding them or losing their state.
+local Palettes = {}
+Palettes.Dark = {
+    Name = "Graphite", Background = Color3.fromRGB(17, 19, 28),
+    Sidebar = Color3.fromRGB(19, 21, 33), Surface = Color3.fromRGB(35, 38, 54),
+    Input = Color3.fromRGB(23, 25, 38), Hover = Color3.fromRGB(49, 48, 72),
+    Text = Color3.fromRGB(244, 244, 252), Secondary = Color3.fromRGB(164, 167, 188),
+    Muted = Color3.fromRGB(112, 117, 143), Accent = Color3.fromRGB(158, 137, 255),
+    AccentDeep = Color3.fromRGB(112, 86, 224), AccentSoft = Color3.fromRGB(57, 48, 90),
+    Edge = Color3.fromRGB(202, 202, 233), Green = Color3.fromRGB(116, 220, 177),
+    Amber = Color3.fromRGB(244, 197, 128), Error = Color3.fromRGB(255, 145, 159),
+    White = Color3.fromRGB(255, 255, 255), Shadow = Color3.fromRGB(5, 6, 13),
+    PanelTop = Color3.fromRGB(245, 243, 255), PanelBottom = Color3.fromRGB(177, 179, 215),
+    ButtonTop = Color3.fromRGB(235, 226, 255), ButtonBottom = Color3.fromRGB(182, 171, 255),
+    SidebarTop = Color3.fromRGB(237, 231, 255), SidebarBottom = Color3.fromRGB(178, 183, 218),
+    SelectionTop = Color3.fromRGB(255, 248, 255), SelectionBottom = Color3.fromRGB(176, 158, 240),
+    Pumpkin = Color3.fromRGB(239,143,67),
+}
+Palettes.Dark.DefaultAccent=Color3.fromRGB(158,137,255)
+Palettes.Halloween=table.clone(Palettes.Dark)
+Palettes.Halloween.Background=Color3.fromRGB(23,21,27)
+Palettes.Halloween.Sidebar=Color3.fromRGB(27,23,31)
+Palettes.Halloween.Surface=Color3.fromRGB(43,36,44)
+Palettes.Halloween.Input=Color3.fromRGB(28,24,32)
+Palettes.Halloween.Hover=Color3.fromRGB(65,47,48)
+Palettes.Halloween.DefaultAccent=Color3.fromRGB(255,157,79)
+Palettes.Light={
+    Background=Color3.fromRGB(246,248,252),Sidebar=Color3.fromRGB(237,240,247),
+    Surface=Color3.fromRGB(251,252,255),Input=Color3.fromRGB(230,234,243),Hover=Color3.fromRGB(223,228,239),
+    Text=Color3.fromRGB(28,32,47),Secondary=Color3.fromRGB(82,91,111),Muted=Color3.fromRGB(111,120,139),
+    Edge=Color3.fromRGB(111,124,148),Green=Color3.fromRGB(31,130,85),Amber=Color3.fromRGB(151,101,24),
+    Error=Color3.fromRGB(190,46,71),White=Color3.fromRGB(255,255,255),Shadow=Color3.fromRGB(81,91,121),
+    PanelTop=Color3.fromRGB(255,255,255),PanelBottom=Color3.fromRGB(237,241,249),
+    ButtonTop=Color3.fromRGB(255,255,255),ButtonBottom=Color3.fromRGB(245,247,253),
+    SidebarTop=Color3.fromRGB(255,255,255),SidebarBottom=Color3.fromRGB(240,243,251),
+    SelectionTop=Color3.fromRGB(255,255,255),SelectionBottom=Color3.fromRGB(246,248,253),
+    DefaultAccent=Color3.fromRGB(135,103,230),
+    Pumpkin=Color3.fromRGB(239,143,67),
+}
+local selectedTheme=CONFIG.UI.Theme
+local accentOverride: Color3?=nil
+if CONFIG.UI.Accent then
+    local hex=CONFIG.UI.Accent:sub(2)
+    accentOverride=Color3.fromRGB(tonumber(hex:sub(1,2),16),tonumber(hex:sub(3,4),16),tonumber(hex:sub(5,6),16))
+end
+local function luminance(color: Color3): number
+    local function linear(v: number): number return v<=0.04045 and v/12.92 or ((v+0.055)/1.055)^2.4 end
+    return linear(color.R)*0.2126+linear(color.G)*0.7152+linear(color.B)*0.0722
+end
+local function contrast(a: Color3,b: Color3): number
+    local x,y=luminance(a),luminance(b)
+    return (math.max(x,y)+0.05)/(math.min(x,y)+0.05)
+end
+local function buildPalette(): any
+    local base=Palettes[selectedTheme]
+    local result=table.clone(base)
+    local accent=accentOverride or base.DefaultAccent
+    local ink=accent
+    local opposite=luminance(base.Surface)>0.5 and Color3.fromRGB(0,0,0) or base.White
+    for _=1,12 do
+        if contrast(ink,base.Surface)>=3 then break end
+        ink=ink:Lerp(opposite,0.18)
+    end
+    result.Accent=ink;result.AccentDeep=accent
+    result.AccentSoft=base.Surface:Lerp(accent,selectedTheme=="Light" and 0.15 or 0.25)
+    result.OnAccent=contrast(accent,base.White)>=4.5 and base.White or Color3.fromRGB(18,20,28)
+    result.ButtonTop=base.White;result.ButtonBottom=Color3.fromRGB(245,245,250)
+    result.Knob=selectedTheme=="Light" and Color3.fromRGB(255,255,255) or base.White
+    return result
+end
+local currentPalette=buildPalette()
+local Theme: any=setmetatable({},{__index=function(self,role)
+    local token={ThemeToken=role};rawset(self,role,token);return token
+end})
+local function resolve(value: any): any
+    if typeof(value)=="table" and value.ThemeToken then return assert(currentPalette[value.ThemeToken],"Unknown theme token") end
+    return value
+end
+local R = {Running = true, Connections = {}, Tweens = {}, Tasks = {}, Bindings={},
+    ReducedMotion = CONFIG.UI.ReducedMotion, MainVisible = false, DragSlider = nil, Suspended=0}
+local State = {Enabled=CONFIG.Enabled,Mode=CONFIG.MoveMode,Speed=CONFIG.Speed,
+    Radius=CONFIG.Radius,AimCamera=CONFIG.AimCamera,Sales=CONFIG.SellItems,Limits=CONFIG.Limits,Glass=CONFIG.UI.Glass}
+local function syncLegacyColors()
+    local roles={Background="Background",Header="Sidebar",CardBg="Surface",CardInner="Input",Accent="Accent",
+        AccentHover="Accent",Success="Green",Warning="Amber",TextPrimary="Text",TextSecondary="Secondary",Border="Edge",TrackOff="Input"}
+    for name,role in pairs(roles) do THEME[name]=currentPalette[role] end
+end
+syncLegacyColors()
+local function own(signal: RBXScriptSignal, callback: any): RBXScriptConnection
+    local connection = signal:Connect(function(...)
+        if R.Running then callback(...) end
+    end)
+    table.insert(R.Connections, connection)
+    return connection
+end
+local function later(seconds: number, callback: () -> ()): any
+    local token = {}
+    R.Tasks[token] = task.delay(seconds, function()
+        R.Tasks[token] = nil
+        if R.Running then callback() end
+    end)
+    return token
+end
+local function cancelLater(token: any)
+    local thread = token and R.Tasks[token]
+    if thread then R.Tasks[token] = nil; pcall(task.cancel, thread) end
+end
+local function style(object: Instance,property: string,value: any)
+    R.Bindings[object]=R.Bindings[object] or {}
+    if typeof(value)=="table" and value.ThemeToken then R.Bindings[object][property]=value end
+    (object :: any)[property]=resolve(value)
+end
+local function animate(object: Instance, seconds: number, goals: any)
+    local resolved={}
+    for property,value in pairs(goals) do
+        if typeof(value)=="table" and value.ThemeToken then
+            R.Bindings[object]=R.Bindings[object] or {};R.Bindings[object][property]=value
+        end
+        resolved[property]=resolve(value)
+    end
+    goals=resolved
+    local old = R.Tweens[object]
+    if old then R.Tweens[object] = nil;old.Connection:Disconnect();old.Tween:Cancel() end
+    if R.ReducedMotion or seconds == 0 then
+        for property, value in pairs(goals) do (object :: any)[property] = value end
+        return
+    end
+    local tween = TweenService:Create(object, TweenInfo.new(seconds, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), goals)
+    local record = {Tween = tween, Goals = goals}
+    R.Tweens[object] = record
+    record.Connection=tween.Completed:Once(function()
+        if R.Tweens[object] == record then R.Tweens[object] = nil end
+    end)
+    tween:Play()
+end
+local function finishAnimations(container: Instance?)
+    local pending={}
+    for object,record in pairs(R.Tweens) do
+        if not container or object==container or object:IsDescendantOf(container) then
+            R.Tweens[object]=nil;table.insert(pending,{Object=object,Record=record})
+        end
+    end
+    for _,entry in ipairs(pending) do
+        local record,object=entry.Record,entry.Object
+        record.Connection:Disconnect();record.Tween:Cancel()
+        if object.Parent then for property,value in pairs(record.Goals) do object[property]=value end end
+    end
+end
+local function make(class: string, properties: any, parent: Instance?): any
+    local object = Instance.new(class)
+    for key, value in pairs(properties) do style(object,key,value) end
+    object.Parent = parent
+    return object
+end
+local function rounded(object: Instance, radius: number)
+    make("UICorner", {CornerRadius = UDim.new(0, radius)}, object)
+end
+local function edge(object: Instance, transparency: number?): UIStroke
+    return make("UIStroke", {Color = Theme.Edge, Thickness = 1, Transparency = transparency or 0.88,
+        ApplyStrokeMode = Enum.ApplyStrokeMode.Border}, object)
+end
+local function gradient(object: Instance, top: Color3, bottom: Color3, angle: number?)
+    local result=make("UIGradient", {Rotation = angle or 90,
+        Color = ColorSequence.new(resolve(top),resolve(bottom))}, object)
+    R.Bindings[result].Color=function() return ColorSequence.new(resolve(top),resolve(bottom)) end
+    return result
+end
+local function panel(parent: Instance, name: string, x: number, y: number, w: number, h: number): Frame
+    local frame = make("Frame", {Name = name, Position = UDim2.fromOffset(x, y), Size = UDim2.fromOffset(w, h),
+        BackgroundColor3 = Theme.Surface, BackgroundTransparency = 0.36, BorderSizePixel = 0}, parent)
+    rounded(frame, 16); edge(frame)
+    gradient(frame, Theme.PanelTop, Theme.PanelBottom, 115)
+    return frame
+end
+local function text(parent: Instance, value: string, x: number, y: number, w: number, h: number,
+    size: number?, color: Color3?, bold: boolean?): TextLabel
+    return make("TextLabel", {BackgroundTransparency = 1, Text = value, Position = UDim2.fromOffset(x, y),
+        Size = UDim2.fromOffset(w, h), Font = bold and Enum.Font.GothamBold or Enum.Font.GothamMedium,
+        TextSize = size or 13, TextColor3 = color or Theme.Text, TextXAlignment = Enum.TextXAlignment.Left,
+        TextTruncate = Enum.TextTruncate.AtEnd, BorderSizePixel = 0}, parent)
+end
+local function wrapped(label: TextLabel)
+    label.TextWrapped, label.TextTruncate, label.TextYAlignment = true, Enum.TextTruncate.None, Enum.TextYAlignment.Top
+end
+local function line(parent: Instance, x1: number, y1: number, x2: number, y2: number, color: Color3, thickness: number?)
+    local delta = Vector2.new(x2 - x1, y2 - y1)
+    local object = make("Frame", {AnchorPoint = Vector2.new(0.5, 0.5),
+        Position = UDim2.fromOffset((x1 + x2) / 2, (y1 + y2) / 2), Size = UDim2.fromOffset(delta.Magnitude, thickness or 1.5),
+        Rotation = math.deg(math.atan2(delta.Y, delta.X)), BackgroundColor3 = color, BorderSizePixel = 0}, parent)
+    rounded(object, 2)
+    return object
+end
+local function icon(parent: Instance, kind: string, x: number, y: number, color: Color3): Frame
+    local root = make("Frame", {BackgroundTransparency = 1, Position = UDim2.fromOffset(x, y), Size = UDim2.fromOffset(22, 22)}, parent)
+    if kind == "grid" then
+        for _, p in ipairs({{3,3},{12,3},{3,12},{12,12}}) do
+            local square = make("Frame", {Position = UDim2.fromOffset(p[1], p[2]), Size = UDim2.fromOffset(6,6),
+                BackgroundTransparency = 1, BorderSizePixel = 0}, root)
+            rounded(square, 2); local stroke = edge(square, 0.12);style(stroke,"Color",color)
+        end
+    elseif kind == "farm" then
+        -- One stroked circle stays readable at UI scale; tiny rotated segments can disappear.
+        local ring=make("Frame",{Name="PowerRing",Position=UDim2.fromOffset(4,5),Size=UDim2.fromOffset(14,14),
+            BackgroundTransparency=1,BorderSizePixel=0},root)
+        rounded(ring,14)
+        local outline=edge(ring,0.02);outline.Thickness=1.8;style(outline,"Color",color)
+        -- Remove the top of the circle without a background-colored masking rectangle.
+        make("UIGradient",{Rotation=90,Transparency=NumberSequence.new({
+            NumberSequenceKeypoint.new(0,1),NumberSequenceKeypoint.new(0.18,1),
+            NumberSequenceKeypoint.new(0.24,0),NumberSequenceKeypoint.new(1,0)})},outline)
+        line(root,11,2,11,10,color,2)
+    elseif kind == "bag" then
+        local bag = make("Frame", {Position = UDim2.fromOffset(4,8),Size = UDim2.fromOffset(14,12),
+            BackgroundTransparency = 1, BorderSizePixel = 0}, root)
+        rounded(bag, 3); local stroke = edge(bag, 0.12);style(stroke,"Color",color)
+        line(root, 8, 8, 8, 4, color); line(root, 8, 4, 14, 4, color); line(root, 14, 4, 14, 8, color)
+    elseif kind == "settings" then
+        for index, yPos in ipairs({5,11,17}) do
+            line(root, 3, yPos, 19, yPos, color)
+            local dot = make("Frame", {Position = UDim2.fromOffset(index == 2 and 6 or 13, yPos-2),Size = UDim2.fromOffset(4,4),
+                BackgroundColor3 = color, BorderSizePixel = 0}, root); rounded(dot, 3)
+        end
+    elseif kind == "close" then
+        line(root, 6, 6, 16, 16, color); line(root, 16, 6, 6, 16, color)
+    elseif kind == "minus" then
+        line(root, 5, 11, 17, 11, color)
+    elseif kind == "arrow" then
+        line(root, 4, 11, 18, 11, color); line(root, 13, 6, 18, 11, color); line(root, 18, 11, 13, 16, color)
+    elseif kind == "key" then
+        local ring = make("Frame", {Position = UDim2.fromOffset(2,3),Size = UDim2.fromOffset(9,9),BackgroundTransparency = 1,BorderSizePixel = 0}, root)
+        rounded(ring, 9); local stroke = edge(ring, 0.05);style(stroke,"Color",color)
+        line(root, 10, 11, 18, 19, color, 2); line(root, 14, 15, 17, 12, color, 2)
+    end
+    return root
+end
+local function button(parent: Instance, title: string, x: number, y: number, w: number, h: number, primary: boolean?): TextButton
+    local base = primary and Theme.AccentDeep or Theme.Surface
+    local object = make("TextButton", {Text = title, Position = UDim2.fromOffset(x, y), Size = UDim2.fromOffset(w, h),
+        BackgroundColor3 = base, BackgroundTransparency = primary and 0.05 or 0.3, BorderSizePixel = 0,
+        TextColor3 = primary and Theme.OnAccent or Theme.Text, TextSize = 12, Font = Enum.Font.GothamMedium, AutoButtonColor = false}, parent)
+    rounded(object, 11); edge(object, primary and 0.7 or 0.88)
+    object:SetAttribute("PreviewSelected",primary==true)
+    if primary then gradient(object, Theme.ButtonTop, Theme.ButtonBottom, 75) end
+    own(object.MouseEnter, function() animate(object, 0.16, {BackgroundColor3 = object:GetAttribute("PreviewSelected") and Theme.Accent or Theme.Hover}) end)
+    own(object.MouseLeave, function() animate(object, 0.16, {BackgroundColor3 = object:GetAttribute("PreviewSelected") and Theme.AccentDeep or base}) end)
+    own(object.MouseButton1Down, function() animate(object, 0.12, {BackgroundTransparency = 0}) end)
+    own(object.MouseButton1Up, function() animate(object, 0.12, {BackgroundTransparency = primary and 0.05 or 0.3}) end)
+    return object
+end
+local function field(parent: Instance, placeholder: string, x: number, y: number, w: number, h: number): TextBox
+    local object = make("TextBox", {Position = UDim2.fromOffset(x,y),Size = UDim2.fromOffset(w,h),
+        BackgroundColor3 = Theme.Input, BackgroundTransparency = 0.1, BorderSizePixel = 0,
+        Text = "", PlaceholderText = placeholder, PlaceholderColor3 = Theme.Muted, ClearTextOnFocus = false,
+        TextColor3 = Theme.Text, TextSize = 13, Font = Enum.Font.GothamMedium,
+        TextXAlignment = Enum.TextXAlignment.Left}, parent)
+    rounded(object, 10); local stroke = edge(object, 0.87)
+    make("UIPadding", {PaddingLeft=UDim.new(0,12),PaddingRight=UDim.new(0,12)},object)
+    own(object.Focused, function() animate(stroke, 0.16, {Color = Theme.Accent, Transparency = 0.28}) end)
+    own(object.FocusLost, function() animate(stroke, 0.16, {Color = Theme.Edge, Transparency = 0.87}) end)
+    return object
+end
+
+local gui = make("ScreenGui", {Name = options.GateOnly and "YBA_Key_UI" or "YBA_Final_UI", Enabled=true, ResetOnSpawn = false, IgnoreGuiInset = false,
+    ZIndexBehavior = Enum.ZIndexBehavior.Sibling, DisplayOrder = options.GateOnly and 1000 or 80}, nil)
+local parented = pcall(function()
+    if typeof(gethui) == "function" then gui.Parent = gethui() else gui.Parent = game:GetService("CoreGui") end
+end)
+if not parented or not gui.Parent then gui.Parent = player:WaitForChild("PlayerGui") end
+local bounds=make("Frame",{Name="LayoutBounds",BackgroundTransparency=1,Size=UDim2.fromScale(1,1)},gui)
+-- Only this small view is constructed while authorization is pending.
+if options.GateOnly then
+    local holder=make("Frame",{Name="KeyWindow",BackgroundTransparency=1,Size=UDim2.fromOffset(420,356),
+        AnchorPoint=Vector2.new(0.5,0.5),Position=UDim2.fromScale(0.5,0.5)},bounds)
+    local scale=make("UIScale",{Scale=1},holder)
+    for index=3,1,-1 do
+        local spread=index*5
+        local shadow=make("Frame",{Position=UDim2.fromOffset(-spread,8-spread),Size=UDim2.fromOffset(420+spread*2,356+spread*2),
+            BackgroundColor3=Theme.Shadow,BackgroundTransparency=0.91,BorderSizePixel=0},holder)
+        rounded(shadow,20+spread)
+    end
+    local shell=make("CanvasGroup",{Name="GlassShell",Size=UDim2.fromScale(1,1),BackgroundColor3=Theme.Background,
+        BackgroundTransparency=1-State.Glass/100,BorderSizePixel=0,ClipsDescendants=true},holder)
+    rounded(shell,20);local border=edge(shell,0.65);gradient(border,Theme.White,Theme.Accent,55)
+    local mark=panel(shell,"KeyMark",24,24,44,44);style(mark,"BackgroundColor3",Theme.AccentSoft)
+    icon(mark,"key",11,11,Theme.Accent)
+    text(shell,"COLLECTOR",80,27,270,16,10,Theme.Accent,true)
+    text(shell,"Доступ к интерфейсу",24,85,372,29,23,Theme.Text,true)
+    local description=text(shell,"Введите актуальный ключ доступа. Проверка выполняется при каждом запуске.",24,125,366,38,12,Theme.Secondary)
+    wrapped(description)
+    local input=field(shell,"Введите ключ",24,177,372,42)
+    local message=text(shell,"Проверяем актуальный ключ…",24,228,372,48,11,Theme.Secondary);wrapped(message)
+    local submit=button(shell,"Отправить",24,296,178,36,true)
+    local retry=button(shell,"Повторить проверку",214,296,182,36,false)
+    local close=button(shell,"",366,19,30,30,false);icon(close,"close",4,4,Theme.Secondary)
+    local function fitGate()
+        local size=bounds.AbsoluteSize
+        if size.X>0 and size.Y>0 then scale.Scale=math.min(1,math.max(1,size.X-32)/420,math.max(1,size.Y-48)/356) end
+    end
+    own(bounds:GetPropertyChangedSignal("AbsoluteSize"),fitGate);fitGate()
+    shell.GroupTransparency=1;animate(shell,0.25,{GroupTransparency=0})
+    R.Gui,R.Input,R.Submit,R.Retry,R.Message,R.Close=gui,input,submit,retry,message,close
+    function R.Stop()
+        if not R.Running then return end
+        R.Running=false
+        for _,connection in ipairs(R.Connections) do connection:Disconnect() end
+        table.clear(R.Connections);finishAnimations(nil)
+        for _,thread in pairs(R.Tasks) do if thread~=coroutine.running() then pcall(task.cancel,thread) end end
+        table.clear(R.Tasks);table.clear(R.Bindings);gui:Destroy()
+    end
+    return R
+end
+
+local root = make("Frame", {Name="PreviewWindow",BackgroundTransparency=1,Size=UDim2.fromOffset(680,480),
+    AnchorPoint=Vector2.new(0.5,0.5),Position=UDim2.fromScale(0.5,0.5),Visible=false},bounds)
+local responsiveScale = make("UIScale", {Scale=1},root)
+local function shadow(parent: Instance, w: number, h: number)
+    for index = 4, 1, -1 do
+        local spread = index * 5
+        local layer = make("Frame", {Name="SoftShadow",Position=UDim2.fromOffset(-spread,8-spread),
+            Size=UDim2.fromOffset(w+spread*2,h+spread*2), BackgroundColor3=Theme.Shadow,
+            BackgroundTransparency=0.91,BorderSizePixel=0,ZIndex=1},parent)
+        rounded(layer,20+spread)
+    end
+end
+shadow(root,680,480)
+local function shell(parent: Instance, w: number, h: number): CanvasGroup
+    local object = make("CanvasGroup", {Name="GlassShell",Size=UDim2.fromOffset(w,h),
+        BackgroundColor3=Theme.Background,BackgroundTransparency=1-State.Glass/100,BorderSizePixel=0,
+        ClipsDescendants=true,ZIndex=2},parent)
+    rounded(object,20)
+    local stroke = edge(object,0.65)
+    gradient(stroke,Theme.White,Theme.Accent,55)
+    local highlight = make("Frame",{Name="TopReflection",Position=UDim2.fromOffset(20,0),Size=UDim2.new(1,-40,0,1),
+        BorderSizePixel=0,BackgroundColor3=Theme.White,BackgroundTransparency=0.5,ZIndex=2},object)
+    make("UIGradient",{Transparency=NumberSequence.new({NumberSequenceKeypoint.new(0,1),NumberSequenceKeypoint.new(0.5,0.15),NumberSequenceKeypoint.new(1,1)})},highlight)
+    return object
+end
+local main = shell(root,680,480)
+local openScale = make("UIScale",{Scale=1},main)
+local sidebar = make("Frame",{Name="Sidebar",Size=UDim2.fromOffset(164,480),BackgroundColor3=Theme.Sidebar,
+    BackgroundTransparency=0.13,BorderSizePixel=0},main)
+gradient(sidebar,Theme.SidebarTop,Theme.SidebarBottom,115)
+make("Frame",{Position=UDim2.fromOffset(163,18),Size=UDim2.fromOffset(1,444),BackgroundColor3=Theme.Edge,
+    BackgroundTransparency=0.92,BorderSizePixel=0},sidebar)
+local logo = panel(sidebar,"BrandMark",18,20,32,32)
+style(logo,"BackgroundColor3",Theme.AccentSoft)
+icon(logo,"farm",5,5,Theme.Accent)
+text(sidebar,"Collector",59,20,100,18,15,Theme.Text,true)
+text(sidebar,"ИНТЕРФЕЙС",18,94,128,15,9,Theme.Muted,true)
+local pageTitle=text(main,"Обзор",184,20,350,27,22,Theme.Text,true)
+local pageSubtitle=text(main,"Всё важное в одном месте",184,50,370,17,11,Theme.Secondary)
+local minimize=button(main,"",592,20,30,30,false);icon(minimize,"minus",4,4,Theme.Secondary)
+local close=button(main,"",632,20,30,30,false);icon(close,"close",4,4,Theme.Secondary)
+local footer=make("Frame",{Position=UDim2.fromOffset(184,437),Size=UDim2.fromOffset(472,30),BackgroundTransparency=1},main)
+make("Frame",{Position=UDim2.fromOffset(0,0),Size=UDim2.new(1,0,0,1),BackgroundColor3=Theme.Edge,BackgroundTransparency=0.92,BorderSizePixel=0},footer)
+local statusDot=make("Frame",{Position=UDim2.fromOffset(0,14),Size=UDim2.fromOffset(5,5),BackgroundColor3=Theme.Muted,BorderSizePixel=0},footer)
+rounded(statusDot,5)
+local status=text(footer,"Ожидание запуска",13,7,459,20,10,Theme.Secondary)
+local function setStatus(message: string, color: Color3?)
+    status.Text=message;animate(statusDot,0.15,{BackgroundColor3=color or Theme.Accent})
+end
+
+local pages, navButtons = {}, {}
+local selected="Обзор"
+local transition=0
+local pageDescriptions={['Обзор']="Всё важное в одном месте",['Фарм']="Движение и подбор предметов",['Автопродажа']="Предметы, лимиты и приоритеты",['Настройки']="Внешний вид и предпросмотр"}
+local function page(name: string): ScrollingFrame
+    local group=make("CanvasGroup",{Name=name,Position=UDim2.fromOffset(184,88),Size=UDim2.fromOffset(472,336),
+        BackgroundTransparency=1,Visible=name==selected,GroupTransparency=0},main)
+    local scroll=make("ScrollingFrame",{Name="Content",Size=UDim2.fromScale(1,1),BackgroundTransparency=1,
+        BorderSizePixel=0,ScrollBarThickness=3,ScrollBarImageColor3=Theme.Accent,ScrollBarImageTransparency=0.35,
+        CanvasSize=UDim2.fromOffset(0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y,ScrollingDirection=Enum.ScrollingDirection.Y},group)
+    make("UIPadding",{PaddingRight=UDim.new(0,6),PaddingBottom=UDim.new(0,3)},scroll)
+    make("UIListLayout",{Padding=UDim.new(0,12),SortOrder=Enum.SortOrder.LayoutOrder},scroll)
+    pages[name]=group
+    return scroll
+end
+local function stackCard(parent: Instance,name: string,height: number,order: number): Frame
+    local object=panel(parent,name,0,0,466,height)
+    object.Size=UDim2.new(1,-6,0,height);object.LayoutOrder=order
+    return object
+end
+local function switch(parent: Instance,x: number,y: number,value: boolean,callback: (boolean)->()): (boolean)->()
+    -- Switches own their pointer handlers; generic button tweens must not cancel their color.
+    local control=make("TextButton",{Name="Toggle",Text="",Position=UDim2.fromOffset(x,y),Size=UDim2.fromOffset(40,24),
+        AutoButtonColor=false,BackgroundColor3=value and Theme.AccentDeep or Theme.Input,BackgroundTransparency=0,BorderSizePixel=0},parent)
+    rounded(control,12);edge(control,0.88)
+    local knob=make("Frame",{Position=UDim2.fromOffset(value and 19 or 3,3),Size=UDim2.fromOffset(18,18),
+        BackgroundColor3=Theme.Knob,BorderSizePixel=0},control);rounded(knob,18)
+    local current,hovered,pressed=value,false,false
+    local function render()
+        local color=current and Theme.AccentDeep or Theme.Input
+        if hovered then color=current and Theme.Accent or Theme.Hover end
+        if pressed then color=current and Theme.AccentDeep or Theme.Hover end
+        control:SetAttribute("ToggleValue",current)
+        animate(control,0.18,{BackgroundColor3=color,BackgroundTransparency=0})
+        animate(knob,0.18,{Position=UDim2.fromOffset(current and 19 or 3,3)})
+    end
+    local function update(nextValue: boolean)
+        current=nextValue
+        render()
+    end
+    own(control.MouseEnter,function() hovered=true;render() end)
+    own(control.MouseLeave,function() hovered=false;pressed=false;render() end)
+    own(control.MouseButton1Down,function() pressed=true;render() end)
+    own(control.MouseButton1Up,function() pressed=false;render() end)
+    own(control.MouseButton1Click,function() update(not current);callback(current) end)
+    render()
+    return update
+end
+local function slider(parent: Instance,name: string,order: number,title: string,minimum: number,maximum: number,
+    initial: number,unit: string,callback: (number)->())
+    local card=stackCard(parent,name,80,order)
+    text(card,title,16,12,280,20,12,Theme.Text,true)
+    local entry=field(card,"",354,10,92,26)
+    entry.Size=UDim2.new(0,92,0,26);entry.Position=UDim2.new(1,-108,0,10)
+    entry.TextXAlignment=Enum.TextXAlignment.Right
+    local track=make("Frame",{Position=UDim2.fromOffset(18,56),Size=UDim2.new(1,-36,0,4),BackgroundColor3=Theme.Input,BorderSizePixel=0},card)
+    rounded(track,4)
+    local fill=make("Frame",{Size=UDim2.fromScale(0,1),BackgroundColor3=Theme.Accent,BorderSizePixel=0},track);rounded(fill,4)
+    local knob=make("Frame",{AnchorPoint=Vector2.new(0.5,0.5),Position=UDim2.fromScale(0,0.5),Size=UDim2.fromOffset(12,12),
+        BackgroundColor3=Theme.Knob,BorderSizePixel=0},track);rounded(knob,12)
+    local knobEdge=edge(knob,0.45);style(knobEdge,"Color",Theme.Muted)
+    local hit=make("TextButton",{Text="",BackgroundTransparency=1,Position=UDim2.fromOffset(0,-12),Size=UDim2.new(1,0,0,28)},track)
+    local value=initial
+    local function set(nextValue: number,notify: boolean)
+        value=math.clamp(math.floor(nextValue+0.5),minimum,maximum)
+        local fraction=(value-minimum)/(maximum-minimum)
+        animate(fill,notify and 0.08 or 0,{Size=UDim2.fromScale(fraction,1)})
+        animate(knob,notify and 0.08 or 0,{Position=UDim2.fromScale(fraction,0.5)})
+        entry.Text=tostring(value)..unit
+        if notify then callback(value) end
+    end
+    local function pointer(xPosition: number)
+        if track.AbsoluteSize.X<=0 then return end
+        set(minimum+math.clamp((xPosition-track.AbsolutePosition.X)/track.AbsoluteSize.X,0,1)*(maximum-minimum),true)
+    end
+    own(hit.InputBegan,function(input)
+        if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then
+            R.DragSlider={Input=input,Update=pointer};pointer(input.Position.X)
+        end
+    end)
+    own(entry.FocusLost,function()
+        local parsed=tonumber(entry.Text:match("%-?%d+"))
+        if parsed and parsed==parsed and math.abs(parsed)<math.huge then set(parsed,true) else set(value,false) end
+    end)
+    set(initial,false)
+end
+
+local overview=page("Обзор")
+local hero=stackCard(overview,"FarmHero",94,1)
+local heroIcon=panel(hero,"PowerMark",16,18,44,44);style(heroIcon,"BackgroundColor3",Theme.AccentSoft)
+icon(heroIcon,"farm",11,11,Theme.Accent)
+text(hero,"Основной автофарм",74,18,300,23,16,Theme.Text,true)
+text(hero,"Сбор предметов и автопродажа",74,47,300,18,11,Theme.Secondary)
+local statRow=make("Frame",{Name="Statistics",Size=UDim2.new(1,-6,0,82),BackgroundTransparency=1,LayoutOrder=2},overview)
+local statA=panel(statRow,"Collected",0,0,227,82);statA.Size=UDim2.new(0.5,-6,1,0)
+local statB=panel(statRow,"Batches",239,0,227,82);statB.Position=UDim2.new(0.5,6,0,0);statB.Size=UDim2.new(0.5,-6,1,0)
+text(statA,"СОБРАНО ПРЕДМЕТОВ",16,13,190,14,9,Theme.Secondary,true)
+local collectedText=text(statA,tostring(STATS.Collected),16,34,140,31,27,Theme.Text,true)
+text(statB,"ПРОДАНО ПАРТИЙ",16,13,190,14,9,Theme.Secondary,true)
+local batchesText=text(statB,tostring(STATS.SoldBatches),16,34,140,31,27,Theme.Text,true)
+local operation=stackCard(overview,"Operation",124,3)
+text(operation,"ТЕКУЩАЯ ОПЕРАЦИЯ",16,13,300,15,9,Theme.Secondary,true)
+local operationTitle=text(operation,"Готов к запуску",16,38,380,22,15,Theme.Text,true)
+local operationDetail=text(operation,"Включите автофарм для сбора предметов и продажи.",16,66,420,30,11,Theme.Secondary)
+wrapped(operationDetail)
+local progress=make("Frame",{Position=UDim2.fromOffset(16,108),Size=UDim2.new(1,-32,0,3),BackgroundColor3=Theme.Input,BorderSizePixel=0},operation)
+rounded(progress,3)
+local progressFill=make("Frame",{Size=UDim2.fromScale(0.12,1),BackgroundColor3=Theme.Accent,BorderSizePixel=0},progress);rounded(progressFill,3)
+local farmSwitchSetters={}
+local function refreshOperation()
+    local names={Search="Поиск предметов",FlightItem="Подлёт к предмету",Collect="Подбор предмета",Selling="Автопродажа",
+        AwaitPickup="Ожидание подбора",AwaitRelease="Ожидание торговца",AwaitCharacter="Ожидание персонажа",Patrol="Патруль карты",Stopped="Автофарм выключен"}
+    operationTitle.Text=CONFIG.Enabled and (names[Farm.State] or Farm.State) or "Автофарм выключен"
+    operationDetail.Text=status.Text
+    animate(progressFill,R.MainVisible and R.Suspended==0 and 0.2 or 0,{Size=UDim2.fromScale(CONFIG.Enabled and 1 or 0.12,1)})
+end
+local function renderEnabled(value: boolean)
+    State.Enabled=value
+    for _,setter in ipairs(farmSwitchSetters) do setter(value) end
+    refreshOperation()
+end
+local function setFarmEnabled(value: boolean) options.OnEnabled(value) end
+local updateMainSwitch=switch(hero,410,28,CONFIG.Enabled,setFarmEnabled)
+table.insert(farmSwitchSetters,updateMainSwitch)
+-- Right aligned controls follow the responsive content width.
+local heroSwitch=hero:FindFirstChildWhichIsA("TextButton")
+if heroSwitch then heroSwitch.Position=UDim2.new(1,-56,0,28) end
+
+local farm=page("Фарм")
+local farmControl=stackCard(farm,"FarmControl",74,1)
+text(farmControl,"Фарм и автопродажа",16,12,340,20,13,Theme.Text,true)
+text(farmControl,"Управление сбором и продажей предметов",16,40,350,16,10,Theme.Secondary)
+table.insert(farmSwitchSetters,switch(farmControl,410,25,CONFIG.Enabled,setFarmEnabled))
+local modeCard=stackCard(farm,"MovementMode",86,2)
+text(modeCard,"Режим перемещения",16,12,350,18,12,Theme.Text,true)
+local instant=button(modeCard,"Instant Teleport",16,40,210,30,false)
+local velocity=button(modeCard,"Stealth Velocity",236,40,210,30,false)
+local function chooseMode(mode: string)
+    State.Mode=mode;CONFIG.MoveMode=mode;Settings.requestSave()
+    instant:SetAttribute("PreviewSelected",mode=="Instant Teleport")
+    velocity:SetAttribute("PreviewSelected",mode=="Stealth Velocity")
+    animate(instant,0.16,{BackgroundColor3=mode=="Instant Teleport" and Theme.AccentDeep or Theme.Surface,
+        TextColor3=mode=="Instant Teleport" and Theme.OnAccent or Theme.Text})
+    animate(velocity,0.16,{BackgroundColor3=mode=="Stealth Velocity" and Theme.AccentDeep or Theme.Surface,
+        TextColor3=mode=="Stealth Velocity" and Theme.OnAccent or Theme.Text})
+    setStatus("Режим перемещения: "..mode)
+end
+own(instant.MouseButton1Click,function() chooseMode("Instant Teleport") end)
+own(velocity.MouseButton1Click,function() chooseMode("Stealth Velocity") end)
+chooseMode(State.Mode)
+slider(farm,"Speed",3,"Скорость движения",20,350,State.Speed,"",function(v) State.Speed=v;CONFIG.Speed=v;Settings.requestSave();setStatus("Скорость: "..v.." studs/s") end)
+slider(farm,"Radius",4,"Радиус поиска",50,5000,State.Radius,"",function(v) State.Radius=v;CONFIG.Radius=v;Settings.requestSave();setStatus("Радиус поиска: "..v.." studs") end)
+local cameraCard=stackCard(farm,"Camera",70,5)
+text(cameraCard,"Камера при подборе",16,12,320,20,12,Theme.Text,true)
+text(cameraCard,"Направлять взгляд на предмет",16,37,340,16,10,Theme.Secondary)
+switch(cameraCard,410,23,State.AimCamera,function(v) State.AimCamera=v;CONFIG.AimCamera=v;Settings.requestSave();setStatus("Камера при подборе: "..(v and "включена" or "выключена")) end)
+
+local sales=page("Автопродажа")
+local searchCard=make("Frame",{Name="Search",Size=UDim2.new(1,-6,0,48),BackgroundTransparency=1,LayoutOrder=1},sales)
+local search=field(searchCard,"Поиск предмета…",0,0,466,38);search.Size=UDim2.new(1,0,0,38)
+local saleHint=stackCard(sales,"SalesHint",58,2)
+text(saleHint,"Продажа при достижении лимита",14,10,420,18,11,Theme.Text,true)
+text(saleHint,"Lucky Arrow и Lucky Mask защищены от продажи",14,32,420,15,10,Theme.Secondary)
+local saleRows={}
+local noResults: TextLabel?=nil
+local function addSaleRow(name: string,limit: number,index: number)
+    for _,entry in ipairs(saleRows) do if entry.Name==name then return end end
+    local row=stackCard(sales,"Sale_"..index,54,index+2)
+    text(row,name,14,17,280,20,11,Theme.Text)
+    local threshold=field(row,"",304,13,74,28)
+    threshold.Text=tostring(limit);threshold.TextXAlignment=Enum.TextXAlignment.Center
+    local setter=switch(row,410,15,CONFIG.SellItems[name]==true,function(value)
+        State.Sales[name]=value;Settings.requestSave();setStatus(name..": "..(value and "разрешён" or "выключен"))
+    end)
+    own(threshold.FocusLost,function()
+        local value=Settings.threshold(tonumber(threshold.Text))
+        if value then State.Limits[name]=value;Settings.requestSave() end
+        threshold.Text=tostring(State.Limits[name]);setStatus("Лимит "..name..": "..threshold.Text)
+    end)
+    table.insert(saleRows,{Name=name,Frame=row,Setter=setter})
+    local query=string.lower(search.Text):match("^%s*(.-)%s*$")
+    row.Visible=string.find(string.lower(name),query,1,true)~=nil
+    if noResults then
+        local found=false
+        for _,entry in ipairs(saleRows) do if entry.Frame.Visible then found=true;break end end
+        noResults.Visible=not found
+    end
+end
+for index,name in ipairs(Sales.Order) do addSaleRow(name,CONFIG.Limits[name],index) end
+noResults=text(sales,"Ничего не найдено. Попробуйте другое название.",0,0,450,48,12,Theme.Secondary)
+noResults.LayoutOrder=999;noResults.Visible=false
+own(search:GetPropertyChangedSignal("Text"),function()
+    local query=string.lower(search.Text):match("^%s*(.-)%s*$")
+    local matches=0
+    for _,entry in ipairs(saleRows) do
+        local visible=string.find(string.lower(entry.Name),query,1,true)~=nil
+        entry.Frame.Visible=visible
+        if visible then matches+=1 end
+    end
+    noResults.Visible=matches==0
+    sales.CanvasPosition=Vector2.zero
+end)
+
+local settings=page("Настройки")
+local themeButtons,paletteButtons={},{}
+local accentHex: TextBox?=nil
+local accentMessage: TextLabel?=nil
+local seasonal=make("Frame",{Name="HalloweenDecoration",Position=UDim2.fromOffset(0,350),Size=UDim2.fromOffset(164,130),
+    BackgroundTransparency=1,Active=false},sidebar)
+-- Small, static seasonal accents occupy only the otherwise empty sidebar corner.
+local pumpkin=make("Frame",{Name="HalloweenPumpkin",Position=UDim2.new(0,8,1,-53),Size=UDim2.fromOffset(40,36),
+    BackgroundTransparency=1,Active=false},seasonal)
+for _,part in ipairs({{0,10,16,24},{9,6,19,29},{21,10,16,24}}) do
+    local lobe=make("Frame",{Position=UDim2.fromOffset(part[1],part[2]),Size=UDim2.fromOffset(part[3],part[4]),
+        BackgroundColor3=Theme.Pumpkin,BackgroundTransparency=0.12,BorderSizePixel=0,Active=false},pumpkin)
+    rounded(lobe,12)
+end
+line(pumpkin,18,8,21,0,Theme.Muted,3)
+line(pumpkin,8,18,12,17,Theme.Background,2);line(pumpkin,25,17,29,18,Theme.Background,2)
+line(pumpkin,13,26,18,29,Theme.Background,1.5);line(pumpkin,18,29,24,26,Theme.Background,1.5)
+for _,endpoint in ipairs({{164,63},{112,130},{120,77}}) do
+    local thread=line(seasonal,164,130,endpoint[1],endpoint[2],Theme.Muted,1)
+    thread.BackgroundTransparency=0.6
+end
+for _,distance in ipairs({18,33,49}) do
+    line(seasonal,164,130-distance,164-distance*0.66,130-distance*0.79,Theme.Muted,1).BackgroundTransparency=0.7
+    line(seasonal,164-distance*0.66,130-distance*0.79,164-distance,130,Theme.Muted,1).BackgroundTransparency=0.7
+end
+local function toHex(color: Color3): string
+    return string.format("#%02X%02X%02X",math.floor(color.R*255+0.5),math.floor(color.G*255+0.5),math.floor(color.B*255+0.5))
+end
+local function persistAppearance()
+    CONFIG.UI={Theme=selectedTheme,Accent=accentOverride and toHex(accentOverride) or nil,Glass=State.Glass,ReducedMotion=R.ReducedMotion}
+    Settings.requestSave()
+end
+local function applyAppearance(name: string?,color: Color3?,reset: boolean?)
+    finishAnimations(nil)
+    if name then selectedTheme=name end
+    if color then accentOverride=color elseif reset then accentOverride=nil end
+    currentPalette=buildPalette();syncLegacyColors()
+    for object,properties in pairs(R.Bindings) do
+        if object.Parent then
+            for property,binding in pairs(properties) do
+                object[property]=typeof(binding)=="function" and binding() or resolve(binding)
+            end
+        end
+    end
+    seasonal.Visible=selectedTheme=="Halloween"
+    for themeName,control in pairs(themeButtons) do
+        local active=themeName==selectedTheme
+        control:SetAttribute("PreviewSelected",active)
+        style(control,"BackgroundColor3",active and Theme.AccentDeep or Theme.Surface)
+        style(control,"TextColor3",active and Theme.OnAccent or Theme.Text)
+    end
+    local chosen=accentOverride or Palettes[selectedTheme].DefaultAccent
+    for _,entry in ipairs(paletteButtons) do
+        entry.Stroke.Transparency=toHex(entry.Color)==toHex(chosen) and 0.05 or 0.8
+        entry.Stroke.Thickness=toHex(entry.Color)==toHex(chosen) and 2 or 1
+    end
+    if accentHex then accentHex.Text=toHex(chosen) end
+    if accentMessage then
+        accentMessage.Text=accentOverride and "Свой цвет применяется ко всем темам" or "Используется стандартный цвет темы"
+        style(accentMessage,"TextColor3",Theme.Secondary)
+    end
+    persistAppearance()
+end
+local lookCard=stackCard(settings,"Appearance",112,1)
+text(lookCard,"Оформление",16,12,320,19,12,Theme.Text,true)
+text(lookCard,"Выберите тему интерфейса",16,36,420,16,10,Theme.Secondary)
+for index,definition in ipairs({{"Halloween","Halloween"},{"Dark","Тёмная"},{"Light","Светлая"}}) do
+    local name,title=definition[1],definition[2]
+    local control=button(lookCard,title,16+(index-1)*146,65,138,31,false)
+    control.Name="Theme_"..name;themeButtons[name]=control
+    own(control.MouseButton1Click,function() applyAppearance(name);setStatus("Тема: "..title) end)
+end
+local accentCard=stackCard(settings,"AccentPicker",179,2)
+text(accentCard,"Общий цвет акцента",16,12,420,20,12,Theme.Text,true)
+local colors={Color3.fromRGB(255,157,79),Color3.fromRGB(158,137,255),Color3.fromRGB(101,163,245),
+    Color3.fromRGB(87,197,156),Color3.fromRGB(235,129,174),Color3.fromRGB(232,190,72)}
+for index,color in ipairs(colors) do
+    local swatch=make("TextButton",{Name="Accent_"..index,Text="",Position=UDim2.fromOffset(16+(index-1)*38,48),
+        Size=UDim2.fromOffset(27,27),BackgroundColor3=color,BorderSizePixel=0,AutoButtonColor=false},accentCard)
+    rounded(swatch,27);local stroke=edge(swatch,0.8)
+    table.insert(paletteButtons,{Color=color,Stroke=stroke})
+    own(swatch.MouseButton1Click,function() applyAppearance(nil,color);setStatus("Цвет акцента: "..toHex(color)) end)
+end
+local resetAccent=button(accentCard,"Сбросить цвет",290,47,156,29,false)
+resetAccent.Name="ResetAccent"
+own(resetAccent.MouseButton1Click,function() applyAppearance(nil,nil,true);setStatus("Возвращён стандартный цвет темы") end)
+accentHex=field(accentCard,"#RRGGBB",16,94,160,32);accentHex.Name="AccentHex"
+local applyAccent=button(accentCard,"Применить",188,94,122,32,false);applyAccent.Name="ApplyAccent"
+accentMessage=text(accentCard,"",16,139,430,23,10,Theme.Secondary)
+accentMessage.Name="AccentMessage"
+local function applyHex()
+    local input=accentHex.Text:match("^%s*(.-)%s*$")
+    local hex=input:match("^#?(%x%x%x%x%x%x)$")
+    if not hex then
+        accentMessage.Text="Введите цвет в формате #RRGGBB, например #FF9D4F"
+        style(accentMessage,"TextColor3",Theme.Error)
+        return
+    end
+    local color=Color3.fromRGB(tonumber(hex:sub(1,2),16),tonumber(hex:sub(3,4),16),tonumber(hex:sub(5,6),16))
+    applyAppearance(nil,color);setStatus("Цвет акцента: "..toHex(color))
+end
+own(applyAccent.MouseButton1Click,applyHex)
+own(accentHex.FocusLost,function(enter) if enter then applyHex() end end)
+slider(settings,"Glass",3,"Плотность стекла",65,96,State.Glass,"%",function(v)
+    State.Glass=v
+    animate(main,0.16,{BackgroundTransparency=1-v/100})
+    persistAppearance()
+end)
+local motionCard=stackCard(settings,"Motion",70,4)
+text(motionCard,"Меньше анимаций",16,12,320,20,12,Theme.Text,true)
+text(motionCard,"Мгновенные переходы и статичное стекло",16,37,350,16,10,Theme.Secondary)
+switch(motionCard,410,23,false,function(value)
+    R.ReducedMotion=value
+    if value then finishAnimations(nil) end
+    persistAppearance()
+end)
+local accessCard=stackCard(settings,"AccessInfo",72,5)
+text(accessCard,"Доступ",16,12,340,19,12,Theme.Text,true)
+text(accessCard,options.AuthSessionOnly and "Допуск принят на этот запуск; сохранение недоступно" or "Допуск сохранён; актуальный ключ проверяется при запуске",16,38,430,21,10,Theme.Secondary)
+local diagnosticCard=stackCard(settings,"MerchantDiagnostics",50,6)
+diagnosticCard.ClipsDescendants=true
+local diagnosticToggle=button(diagnosticCard,"Диагностика   +",12,8,442,33,false)
+diagnosticToggle.Size=UDim2.new(1,-24,0,33)
+local diagnosticBody=make("Frame",{Name="DiagnosticBody",Position=UDim2.fromOffset(12,52),Size=UDim2.new(1,-24,0,220),BackgroundTransparency=1,Visible=false},diagnosticCard)
+local diagnosticLabel=text(diagnosticBody,"Полная автопродажа включена. Диагностика нужна только для проверки диалога.",4,0,430,50,11,Theme.Secondary)
+wrapped(diagnosticLabel)
+local expanded=false
+own(diagnosticToggle.MouseButton1Click,function()
+    expanded=not expanded;diagnosticBody.Visible=expanded
+    diagnosticToggle.Text=expanded and "Диагностика   −" or "Диагностика   +"
+    animate(diagnosticCard,0.2,{Size=UDim2.new(1,-6,0,expanded and 280 or 50)})
+end)
+for index,definition in ipairs({{"Полная автопродажа","Full"},{"Проверка первого клика","FirstClick"},{"Сравнить ввод","Compare"},{"Остановить попытку","Stop"}}) do
+    local mode=definition[2]
+    local control=button(diagnosticBody,definition[1],0,54+(index-1)*39,430,32,false)
+    control.Size=UDim2.new(1,0,0,32);control.Name="Diagnostic_"..mode
+    own(control.MouseButton1Click,function() options.OnDiagnostic(mode) end)
+end
+
+local navSelection=make("Frame",{Position=UDim2.fromOffset(12,118),Size=UDim2.fromOffset(140,42),
+    BackgroundColor3=Theme.AccentSoft,BackgroundTransparency=0.15,BorderSizePixel=0,ZIndex=2},sidebar)
+rounded(navSelection,12);edge(navSelection,0.86)
+gradient(navSelection,Theme.SelectionTop,Theme.SelectionBottom,0)
+local function selectPage(name: string)
+    selected=name;transition+=1
+    local generation=transition
+    R.DragSlider=nil
+    pageTitle.Text=name;pageSubtitle.Text=pageDescriptions[name]
+    for title,entry in pairs(navButtons) do
+        animate(entry.Label,0.15,{TextColor3=title==name and Theme.Text or Theme.Secondary})
+        if title==name then animate(navSelection,0.2,{Position=UDim2.fromOffset(12,entry.Y)}) end
+    end
+    -- Hide the old page immediately; a stale delayed transition cannot restore it.
+    for title,group in pairs(pages) do group.Visible=title==name end
+    local group=pages[name]
+    group.GroupTransparency=R.ReducedMotion and 0 or 0.8
+    animate(group,0.2,{GroupTransparency=0})
+    later(0.2,function() if generation==transition then group.GroupTransparency=0 end end)
+end
+for index,definition in ipairs({{"Обзор","grid"},{"Фарм","farm"},{"Автопродажа","bag"},{"Настройки","settings"}}) do
+    local name,kind=definition[1],definition[2]
+    local y=118+(index-1)*48
+    local nav=make("TextButton",{Name="Nav_"..index,Text="",Position=UDim2.fromOffset(12,y),Size=UDim2.fromOffset(140,42),
+        BackgroundTransparency=1,BackgroundColor3=Theme.Hover,AutoButtonColor=false,BorderSizePixel=0,ZIndex=3},sidebar)
+    rounded(nav,12)
+    icon(nav,kind,11,10,Theme.Accent)
+    local label=text(nav,name,43,10,94,22,11,name==selected and Theme.Text or Theme.Secondary)
+    navButtons[name]={Label=label,Y=y}
+    own(nav.MouseEnter,function() if selected~=name then animate(nav,0.14,{BackgroundTransparency=0.65}) end end)
+    own(nav.MouseLeave,function() animate(nav,0.14,{BackgroundTransparency=1}) end)
+    own(nav.MouseButton1Click,function() selectPage(name) end)
+end
+
+local dock=button(bounds,"",24,0,188,48,false)
+dock.Name="RestorePreview";dock.Position=UDim2.new(0,24,1,-72);dock.Visible=false
+style(dock,"BackgroundColor3",Theme.Background);dock.BackgroundTransparency=0.08
+icon(dock,"farm",12,13,Theme.Accent)
+text(dock,"YBA Collector",43,7,132,18,12,Theme.Text,true)
+text(dock,"Развернуть · Right Shift",43,26,132,14,9,Theme.Secondary)
+local showMain: ()->()
+local windowGeneration=0
+local windowTimer: any=nil
+local drag: any=nil
+local function setWindowVisible(visible: boolean)
+    if not R.Running or R.Suspended>0 then return end
+    windowGeneration+=1
+    local generation=windowGeneration
+    cancelLater(windowTimer);windowTimer=nil
+    R.MainVisible=visible;R.DragSlider=nil;drag=nil
+    if visible then
+        local wasVisible=root.Visible
+        dock.Visible=false;root.Visible=true
+        if not wasVisible then main.GroupTransparency=1;openScale.Scale=0.96 end
+        for _,object in ipairs(root:GetChildren()) do
+            if object.Name=="SoftShadow" then
+                if not wasVisible then object.BackgroundTransparency=1 end
+                animate(object,0.22,{BackgroundTransparency=0.91})
+            end
+        end
+        animate(main,0.22,{GroupTransparency=0})
+        animate(openScale,0.22,{Scale=1})
+        refreshOperation()
+    else
+        -- Preserve current scale/transparency so a quick second Shift reverses smoothly.
+        for _,object in ipairs(root:GetChildren()) do
+            if object.Name=="SoftShadow" then animate(object,0.18,{BackgroundTransparency=1}) end
+        end
+        animate(main,0.18,{GroupTransparency=1})
+        animate(openScale,0.18,{Scale=0.96})
+        local function finished()
+            if generation~=windowGeneration or R.MainVisible then return end
+            root.Visible=false;dock.Visible=true;finishAnimations(root)
+        end
+        if R.ReducedMotion then finished() else windowTimer=later(0.18,finished) end
+    end
+end
+local function minimizeMain()
+    setWindowVisible(false)
+end
+showMain=function()
+    setWindowVisible(true)
+end
+own(minimize.MouseButton1Click,minimizeMain)
+own(dock.MouseButton1Click,showMain)
+
+local dragged=false
+local function viewport(): Vector2
+    if bounds.AbsoluteSize.X>0 and bounds.AbsoluteSize.Y>0 then return bounds.AbsoluteSize end
+    local camera=Workspace.CurrentCamera
+    if camera and camera.ViewportSize.X>0 and camera.ViewportSize.Y>0 then return camera.ViewportSize end
+    return Vector2.new(1280,720)
+end
+local function fit()
+    local size=viewport()
+    responsiveScale.Scale=math.min(1,math.max(1,size.X-32)/680,math.max(1,size.Y-48)/480)
+    if dragged then
+        local half=Vector2.new(340,240)*responsiveScale.Scale
+        local current=Vector2.new(root.Position.X.Offset,root.Position.Y.Offset)
+        root.Position=UDim2.fromOffset(math.clamp(current.X,half.X,size.X-half.X),math.clamp(current.Y,half.Y,size.Y-half.Y))
+    end
+end
+local dragHandle=make("TextButton",{Name="DragHandle",Text="",BackgroundTransparency=1,
+    Position=UDim2.fromOffset(176,8),Size=UDim2.fromOffset(402,68),ZIndex=5},main)
+own(dragHandle.InputBegan,function(input)
+    if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then
+        local size=viewport()
+        local center=Vector2.new(root.Position.X.Scale*size.X+root.Position.X.Offset,root.Position.Y.Scale*size.Y+root.Position.Y.Offset)
+        drag={Input=input,Start=Vector2.new(input.Position.X,input.Position.Y),Center=center}
+    end
+end)
+own(Input.InputChanged,function(input)
+    if not R.MainVisible then return end
+    if R.DragSlider and (input.UserInputType==Enum.UserInputType.MouseMovement or input==R.DragSlider.Input) then
+        R.DragSlider.Update(input.Position.X)
+    elseif drag and (input.UserInputType==Enum.UserInputType.MouseMovement or input==drag.Input) then
+        dragged=true
+        local center=drag.Center+Vector2.new(input.Position.X,input.Position.Y)-drag.Start
+        root.Position=UDim2.fromOffset(center.X,center.Y);fit()
+    end
+end)
+own(Input.InputEnded,function(input)
+    if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then
+        if not R.DragSlider or input==R.DragSlider.Input or input.UserInputType==Enum.UserInputType.MouseButton1 then R.DragSlider=nil end
+        if not drag or input==drag.Input or input.UserInputType==Enum.UserInputType.MouseButton1 then drag=nil end
+    end
+end)
+own(Input.WindowFocusReleased,function() drag=nil;R.DragSlider=nil end)
+own(Input.InputBegan,function(input,processed)
+    if processed or input.KeyCode~=Enum.KeyCode.RightShift or R.Suspended>0 or Input:GetFocusedTextBox() then return end
+    setWindowVisible(not R.MainVisible)
+end)
+own(bounds:GetPropertyChangedSignal("AbsoluteSize"),fit)
+function R.Stop()
+    if not R.Running then return end
+    R.Running=false;R.MainVisible=false;windowGeneration+=1
+    drag=nil;R.DragSlider=nil
+    for _,connection in ipairs(R.Connections) do connection:Disconnect() end
+    table.clear(R.Connections)
+    finishAnimations(nil)
+    for _,thread in pairs(R.Tasks) do if thread~=coroutine.running() then pcall(task.cancel,thread) end end
+    table.clear(R.Tasks)
+    table.clear(R.Bindings)
+    gui:Destroy()
+end
+own(close.MouseButton1Click,options.OnClose)
+R.Gui=gui
+R.SetEnabled=renderEnabled
+R.RefreshOperation=refreshOperation
+R.AddSaleRow=addSaleRow
+R.DiagnosticLabel=diagnosticLabel
+function R.RefreshStats()
+    collectedText.Text=tostring(STATS.Collected);batchesText.Text=tostring(STATS.SoldBatches)
+end
+local semanticRoles={Success="Green",Warning="Amber",TextPrimary="Text",TextSecondary="Secondary",Accent="Accent",AccentHover="Accent"}
+R.StatusLabel=setmetatable({},{__index=function(_,property) return status[property] end,__newindex=function(_,property,value)
+    if property=="TextColor3" then
+        local role="Secondary"
+        for name,token in pairs(semanticRoles) do if THEME[name]==value then role=token;break end end
+        style(status,"TextColor3",Theme[role]);style(statusDot,"BackgroundColor3",Theme[role])
+    else status[property]=value end
+    if property=="Text" then refreshOperation() end
+end})
+local statsText=""
+R.StatsLabel=setmetatable({},{__index=function(_,property) if property=="Text" then return statsText end end,__newindex=function(_,property,value)
+    if property=="Text" then statsText=value;R.RefreshStats() end
+end})
+function R.SuspendForMerchant(): ()->()
+    R.Suspended+=1;windowGeneration+=1;cancelLater(windowTimer);windowTimer=nil
+    R.DragSlider=nil;drag=nil;gui.Enabled=false;root.Visible=false;dock.Visible=false;finishAnimations(root)
+    local released=false
+    return function()
+        if released then return end
+        released=true;R.Suspended=math.max(0,R.Suspended-1)
+        if not R.Running or R.Suspended>0 then return end
+        gui.Enabled=true
+        main.GroupTransparency=R.MainVisible and 0 or 1;openScale.Scale=R.MainVisible and 1 or 0.96
+        root.Visible=R.MainVisible;dock.Visible=not R.MainVisible
+    end
+end
+applyAppearance();fit();showMain();renderEnabled(CONFIG.Enabled);R.RefreshStats()
+setStatus("Статус: Ожидание запуска",Theme.Muted)
+refreshOperation()
+return R
+
+end
+
 -- key.json was published and verified on the repository main branch.
 -- Only JSON is fetched. A local key record never substitutes for a failed online check.
 local Auth = {Url = "https://raw.githubusercontent.com/avov53/ItemsInThemap/main/key.json", SessionOnly = false}
@@ -473,43 +1378,13 @@ function Auth.savedMatches(remote: any): boolean
         and Settings.finite(saved.Revision) and saved.Revision == remote.Revision
 end
 function Auth.run(): boolean
-    local container = getGuiContainer()
-    for _, name in ipairs({"YBA_Key_UI", "YBA_Final_UI"}) do
-        local old = container:FindFirstChild(name)
+    local container=getGuiContainer()
+    for _,name in ipairs({"YBA_Key_UI","YBA_Final_UI"}) do
+        local old=container:FindFirstChild(name)
         if old then old:Destroy() end
     end
-    local gui = Instance.new("ScreenGui")
-    gui.Name, gui.ResetOnSpawn, gui.DisplayOrder = "YBA_Key_UI", false, 1000
-    gui.Parent = container
-    local frame = Instance.new("Frame")
-    frame.Size, frame.Position = UDim2.fromOffset(350, 242), UDim2.new(0.5, -175, 0.5, -121)
-    frame.BackgroundColor3, frame.BorderSizePixel, frame.Parent = THEME.Background, 0, gui
-    local corner = Instance.new("UICorner")
-    corner.CornerRadius, corner.Parent = UDim.new(0, 12), frame
-    local title = Instance.new("TextLabel")
-    title.Size, title.Position = UDim2.fromOffset(285, 30), UDim2.fromOffset(16, 12)
-    title.BackgroundTransparency, title.Text, title.TextColor3 = 1, "YBA — Ключ доступа", THEME.TextPrimary
-    title.Font, title.TextSize, title.Parent = Enum.Font.GothamBold, 16, frame
-    local input = Instance.new("TextBox")
-    input.Size, input.Position = UDim2.fromOffset(318, 38), UDim2.fromOffset(16, 62)
-    input.Text, input.PlaceholderText, input.ClearTextOnFocus = "", "Введите ключ", false
-    input.BackgroundColor3, input.TextColor3, input.TextSize, input.Parent = THEME.CardInner, THEME.TextPrimary, 16, frame
-    input.Visible = false
-    local function button(text: string, x: number, y: number, width: number): TextButton
-        local object = Instance.new("TextButton")
-        object.Size, object.Position = UDim2.fromOffset(width, 34), UDim2.fromOffset(x, y)
-        object.Text, object.TextSize, object.TextColor3 = text, 13, THEME.TextPrimary
-        object.BackgroundColor3, object.Parent = THEME.Accent, frame
-        return object
-    end
-    local submit = button("Отправить", 16, 112, 152)
-    local retry = button("Повторить проверку", 180, 112, 154)
-    local close = button("×", 310, 12, 24)
-    submit.Visible = false
-    local message = Instance.new("TextLabel")
-    message.Size, message.Position = UDim2.fromOffset(318, 70), UDim2.fromOffset(16, 158)
-    message.BackgroundTransparency, message.TextWrapped, message.TextSize = 1, true, 12
-    message.TextColor3, message.Text, message.Parent = THEME.TextSecondary, "Проверяем актуальный ключ на GitHub…", frame
+    local view=buildCollectorUI({GateOnly=true})
+    local input,submit,retry,close,message=view.Input,view.Submit,view.Retry,view.Close,view.Message
     local signal = Instance.new("BindableEvent")
     local state = {Done = false, Allowed = false, Busy = false, Submitting = false, Generation = 0, Remote = nil, Worker = nil, Timer = nil}
     local connections = {}
@@ -523,7 +1398,7 @@ function Auth.run(): boolean
         cancelTask(state.Worker); cancelTask(state.Timer)
         for _, connection in ipairs(connections) do connection:Disconnect() end
         table.clear(connections)
-        gui:Destroy()
+        view.Stop()
         signal:Fire()
     end
     runtime.AuthCancel = function() finish(false) end
@@ -605,615 +1480,11 @@ end
 if not Auth.run() then return end
 CONFIG.Enabled = false
 
-local oldGui = getGuiContainer():FindFirstChild("YBA_Final_UI")
-if oldGui then
-    oldGui:Destroy()
-end
-
-local screenGui = Instance.new("ScreenGui")
-screenGui.Name = "YBA_Final_UI"
-screenGui.ResetOnSpawn = false
-screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-screenGui.Parent = getGuiContainer()
-runtime.RootGui = screenGui
-
--- Главное окно
-local mainFrame = Instance.new("Frame")
-mainFrame.Name = "MainFrame"
-mainFrame.Size = UDim2.new(0, 350, 0, 520)
-mainFrame.Position = UDim2.new(0.5, -175, 0.5, -260)
-mainFrame.BackgroundColor3 = THEME.Background
-mainFrame.BorderSizePixel = 0
-mainFrame.ClipsDescendants = true
-mainFrame.Parent = screenGui
-
-local mainCorner = Instance.new("UICorner")
-mainCorner.CornerRadius = UDim.new(0, 14)
-mainCorner.Parent = mainFrame
-
-local mainStroke = Instance.new("UIStroke")
-mainStroke.Thickness = 1.2
-mainStroke.Color = THEME.Border
-mainStroke.Transparency = 0.1
-mainStroke.Parent = mainFrame
-
--- Хедер
-local header = Instance.new("Frame")
-header.Name = "Header"
-header.Size = UDim2.new(1, 0, 0, 50)
-header.BackgroundColor3 = THEME.Header
-header.BorderSizePixel = 0
-header.Parent = mainFrame
-
-local headerCorner = Instance.new("UICorner")
-headerCorner.CornerRadius = UDim.new(0, 14)
-headerCorner.Parent = header
-
-local headerCover = Instance.new("Frame")
-headerCover.Size = UDim2.new(1, 0, 0, 12)
-headerCover.Position = UDim2.new(0, 0, 1, -12)
-headerCover.BackgroundColor3 = THEME.Header
-headerCover.BorderSizePixel = 0
-headerCover.Parent = header
-
-local logoImg = Instance.new("ImageLabel")
-logoImg.Size = UDim2.new(0, 20, 0, 20)
-logoImg.Position = UDim2.new(0, 14, 0.5, -10)
-logoImg.BackgroundTransparency = 1
-logoImg.Image = ICONS.Radar
-logoImg.ImageColor3 = THEME.Accent
-logoImg.Parent = header
-
-local titleLabel = Instance.new("TextLabel")
-titleLabel.Text = "YBA Ultimate Collector"
-titleLabel.Font = Enum.Font.GothamBold
-titleLabel.TextSize = 14
-titleLabel.TextColor3 = THEME.TextPrimary
-titleLabel.TextXAlignment = Enum.TextXAlignment.Left
-titleLabel.Position = UDim2.new(0, 42, 0, 9)
-titleLabel.Size = UDim2.new(0, 200, 0, 18)
-titleLabel.BackgroundTransparency = 1
-titleLabel.Parent = header
-
-local subLabel = Instance.new("TextLabel")
-subLabel.Text = "NoClip & Key Nav Auto-Seller"
-subLabel.Font = Enum.Font.GothamMedium
-subLabel.TextSize = 11
-subLabel.TextColor3 = THEME.TextSecondary
-subLabel.TextXAlignment = Enum.TextXAlignment.Left
-subLabel.Position = UDim2.new(0, 42, 0, 26)
-subLabel.Size = UDim2.new(0, 200, 0, 16)
-subLabel.BackgroundTransparency = 1
-subLabel.Parent = header
-
-local closeButton = Instance.new("ImageButton")
-closeButton.Size = UDim2.new(0, 26, 0, 26)
-closeButton.Position = UDim2.new(1, -36, 0.5, -13)
-closeButton.BackgroundColor3 = THEME.CardBg
-closeButton.BorderSizePixel = 0
-closeButton.Image = ICONS.Close
-closeButton.ImageColor3 = THEME.TextSecondary
-closeButton.Parent = header
-
-local closeCorner = Instance.new("UICorner")
-closeCorner.CornerRadius = UDim.new(0, 8)
-closeCorner.Parent = closeButton
-
-connectOwned(closeButton.MouseButton1Click, function()
-    runtime.Stop()
-end)
-
--- Drag & Drop
-local isDragging = false
-local dragStart = Vector2.zero
-local startPos = UDim2.new()
-local currentDragInput: InputObject? = nil
-
-connectOwned(header.InputBegan, function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-        isDragging = true
-        dragStart = Vector2.new(input.Position.X, input.Position.Y)
-        startPos = mainFrame.Position
-
-        connectOwned(input.Changed, function()
-            if input.UserInputState == Enum.UserInputState.End then
-                isDragging = false
-            end
-        end)
-    end
-end)
-
-connectOwned(header.InputChanged, function(input)
-    if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
-        currentDragInput = input
-    end
-end)
-
-connectOwned(UserInputService.InputChanged, function(input)
-    if isDragging and input == currentDragInput then
-        local delta = Vector2.new(input.Position.X, input.Position.Y) - dragStart
-        local target = UDim2.new(
-            startPos.X.Scale,
-            startPos.X.Offset + delta.X,
-            startPos.Y.Scale,
-            startPos.Y.Offset + delta.Y
-        )
-        TweenService:Create(mainFrame, TweenInfo.new(0.06, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Position = target }):Play()
-    end
-end)
-
--- Скролл-контейнер
-local scrollContent = Instance.new("ScrollingFrame")
-scrollContent.Name = "ScrollContent"
-scrollContent.Size = UDim2.new(1, -20, 1, -58)
-scrollContent.Position = UDim2.new(0, 10, 0, 54)
-scrollContent.BackgroundTransparency = 1
-scrollContent.BorderSizePixel = 0
-scrollContent.ScrollBarThickness = 3
-scrollContent.ScrollBarImageColor3 = THEME.Border
-scrollContent.CanvasSize = UDim2.new(0, 0, 0, 720)
-scrollContent.Parent = mainFrame
-
-local contentLayout = Instance.new("UIListLayout")
-contentLayout.SortOrder = Enum.SortOrder.LayoutOrder
-contentLayout.Padding = UDim.new(0, 8)
-contentLayout.Parent = scrollContent
-
---------------------------------------------------------------------------------
--- ЭЛЕМЕНТЫ UI: TOGGLE, РЕЖИМ, СЛАЙДЕРЫ
---------------------------------------------------------------------------------
--- 1. Toggle автофарма
-local farmToggleCard = Instance.new("Frame")
-farmToggleCard.Size = UDim2.new(1, 0, 0, 84)
-farmToggleCard.BackgroundColor3 = THEME.CardBg
-farmToggleCard.BorderSizePixel = 0
-farmToggleCard.LayoutOrder = 1
-farmToggleCard.Parent = scrollContent
-
-local farmCorner = Instance.new("UICorner")
-farmCorner.CornerRadius = UDim.new(0, 10)
-farmCorner.Parent = farmToggleCard
-
-local farmIcon = Instance.new("ImageLabel")
-farmIcon.Size = UDim2.new(0, 18, 0, 18)
-farmIcon.Position = UDim2.new(0, 12, 0.5, -9)
-farmIcon.BackgroundTransparency = 1
-farmIcon.Image = ICONS.Power
-farmIcon.ImageColor3 = THEME.Accent
-farmIcon.Parent = farmToggleCard
-
-local farmTitle = Instance.new("TextLabel")
-farmTitle.Text = "Основной автофарм"
-farmTitle.Font = Enum.Font.GothamMedium
-farmTitle.TextSize = 13
-farmTitle.TextColor3 = THEME.TextPrimary
-farmTitle.TextXAlignment = Enum.TextXAlignment.Left
-farmTitle.Position = UDim2.new(0, 38, 0, 10)
-farmTitle.Size = UDim2.new(0, 170, 0, 16)
-farmTitle.BackgroundTransparency = 1
-farmTitle.Parent = farmToggleCard
-
-local farmDesc = Instance.new("TextLabel")
-farmDesc.Text = "Сбор лута + продажа торговцу"
-farmDesc.Font = Enum.Font.Gotham
-farmDesc.TextSize = 10
-farmDesc.TextColor3 = THEME.TextSecondary
-farmDesc.TextXAlignment = Enum.TextXAlignment.Left
-farmDesc.Position = UDim2.new(0, 38, 0, 27)
-farmDesc.Size = UDim2.new(0, 170, 0, 14)
-farmDesc.BackgroundTransparency = 1
-farmDesc.Parent = farmToggleCard
-
-local farmSwitchBack = Instance.new("TextButton")
-farmSwitchBack.Text = ""
-farmSwitchBack.AutoButtonColor = false
-farmSwitchBack.Size = UDim2.new(0, 44, 0, 22)
-farmSwitchBack.Position = UDim2.new(1, -54, 0.5, -11)
-farmSwitchBack.BackgroundColor3 = THEME.TrackOff
-farmSwitchBack.BorderSizePixel = 0
-farmSwitchBack.Parent = farmToggleCard
-
-local farmSwitchCorner = Instance.new("UICorner")
-farmSwitchCorner.CornerRadius = UDim.new(1, 0)
-farmSwitchCorner.Parent = farmSwitchBack
-
-local farmKnob = Instance.new("Frame")
-farmKnob.Size = UDim2.new(0, 16, 0, 16)
-farmKnob.Position = UDim2.new(0, 3, 0.5, -8)
-farmKnob.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
-farmKnob.BorderSizePixel = 0
-farmKnob.Parent = farmSwitchBack
-
-local farmKnobCorner = Instance.new("UICorner")
-farmKnobCorner.CornerRadius = UDim.new(1, 0)
-farmKnobCorner.Parent = farmKnob
-
-local aimCameraButton = Instance.new("TextButton")
-aimCameraButton.Size = UDim2.new(1, -24, 0, 24)
-aimCameraButton.Position = UDim2.fromOffset(12, 54)
-aimCameraButton.BackgroundColor3 = THEME.CardInner
-aimCameraButton.TextColor3 = THEME.TextPrimary
-aimCameraButton.TextSize = 11
-aimCameraButton.Text = "Камера при подборе: " .. (CONFIG.AimCamera and "ВКЛ" or "ВЫКЛ")
-aimCameraButton.Parent = farmToggleCard
-connectOwned(aimCameraButton.MouseButton1Click, function()
-    CONFIG.AimCamera = not CONFIG.AimCamera
-    aimCameraButton.Text = "Камера при подборе: " .. (CONFIG.AimCamera and "ВКЛ" or "ВЫКЛ")
-    Settings.requestSave()
-end)
-
--- 2. Селектор режима перемещения
-local modeCard = Instance.new("Frame")
-modeCard.Size = UDim2.new(1, 0, 0, 54)
-modeCard.BackgroundColor3 = THEME.CardBg
-modeCard.BorderSizePixel = 0
-modeCard.LayoutOrder = 2
-modeCard.Parent = scrollContent
-
-local modeCorner = Instance.new("UICorner")
-modeCorner.CornerRadius = UDim.new(0, 10)
-modeCorner.Parent = modeCard
-
-local modeTitle = Instance.new("TextLabel")
-modeTitle.Text = "Режим перемещения"
-modeTitle.Font = Enum.Font.GothamMedium
-modeTitle.TextSize = 12
-modeTitle.TextColor3 = THEME.TextPrimary
-modeTitle.TextXAlignment = Enum.TextXAlignment.Left
-modeTitle.Position = UDim2.new(0, 14, 0, 8)
-modeTitle.Size = UDim2.new(0, 150, 0, 14)
-modeTitle.BackgroundTransparency = 1
-modeTitle.Parent = modeCard
-
-local modeBtn = Instance.new("TextButton")
-modeBtn.Text = CONFIG.MoveMode
-modeBtn.Font = Enum.Font.GothamBold
-modeBtn.TextSize = 11
-modeBtn.TextColor3 = (CONFIG.MoveMode == "Instant Teleport") and THEME.Warning or THEME.TextPrimary
-modeBtn.BackgroundColor3 = THEME.CardInner
-modeBtn.BorderSizePixel = 0
-modeBtn.Size = UDim2.new(1, -28, 0, 24)
-modeBtn.Position = UDim2.new(0, 14, 0, 24)
-modeBtn.Parent = modeCard
-
-local modeBtnCorner = Instance.new("UICorner")
-modeBtnCorner.CornerRadius = UDim.new(0, 6)
-modeBtnCorner.Parent = modeBtn
-
-local modeBtnStroke = Instance.new("UIStroke")
-modeBtnStroke.Color = THEME.Border
-modeBtnStroke.Thickness = 1
-modeBtnStroke.Parent = modeBtn
-
-connectOwned(modeBtn.MouseButton1Click, function()
-    if CONFIG.MoveMode == "Stealth Velocity" then
-        CONFIG.MoveMode = "Instant Teleport"
-        modeBtn.TextColor3 = THEME.Warning
-    else
-        CONFIG.MoveMode = "Stealth Velocity"
-        modeBtn.TextColor3 = THEME.TextPrimary
-    end
-    modeBtn.Text = CONFIG.MoveMode
-    Settings.requestSave()
-end)
-
--- 3. Слайдер скорости (20 - 350)
-local speedCard = Instance.new("Frame")
-speedCard.Size = UDim2.new(1, 0, 0, 60)
-speedCard.BackgroundColor3 = THEME.CardBg
-speedCard.BorderSizePixel = 0
-speedCard.LayoutOrder = 3
-speedCard.Parent = scrollContent
-
-local speedCorner = Instance.new("UICorner")
-speedCorner.CornerRadius = UDim.new(0, 10)
-speedCorner.Parent = speedCard
-
-local speedTitle = Instance.new("TextLabel")
-speedTitle.Text = "Скорость движения"
-speedTitle.Font = Enum.Font.GothamMedium
-speedTitle.TextSize = 12
-speedTitle.TextColor3 = THEME.TextPrimary
-speedTitle.TextXAlignment = Enum.TextXAlignment.Left
-speedTitle.Position = UDim2.new(0, 14, 0, 10)
-speedTitle.Size = UDim2.new(0, 160, 0, 14)
-speedTitle.BackgroundTransparency = 1
-speedTitle.Parent = speedCard
-
-local speedIndicator = Instance.new("TextLabel")
-speedIndicator.Text = tostring(CONFIG.Speed) .. " studs/s"
-speedIndicator.Font = Enum.Font.GothamBold
-speedIndicator.TextSize = 11
-speedIndicator.TextColor3 = THEME.Accent
-speedIndicator.TextXAlignment = Enum.TextXAlignment.Right
-speedIndicator.Position = UDim2.new(1, -90, 0, 10)
-speedIndicator.Size = UDim2.new(0, 76, 0, 14)
-speedIndicator.BackgroundTransparency = 1
-speedIndicator.Parent = speedCard
-
-local speedTrack = Instance.new("Frame")
-speedTrack.Size = UDim2.new(1, -28, 0, 6)
-speedTrack.Position = UDim2.new(0, 14, 0, 38)
-speedTrack.BackgroundColor3 = THEME.Border
-speedTrack.BorderSizePixel = 0
-speedTrack.Parent = speedCard
-
-local speedTrackCorner = Instance.new("UICorner")
-speedTrackCorner.CornerRadius = UDim.new(1, 0)
-speedTrackCorner.Parent = speedTrack
-
-local speedFill = Instance.new("Frame")
-local defSpeedRatio = math.clamp((CONFIG.Speed - 20) / (350 - 20), 0, 1)
-speedFill.Size = UDim2.new(defSpeedRatio, 0, 1, 0)
-speedFill.BackgroundColor3 = THEME.Accent
-speedFill.BorderSizePixel = 0
-speedFill.Parent = speedTrack
-
-local speedFillCorner = Instance.new("UICorner")
-speedFillCorner.CornerRadius = UDim.new(1, 0)
-speedFillCorner.Parent = speedFill
-
-local speedTrigger = Instance.new("TextButton")
-speedTrigger.Text = ""
-speedTrigger.BackgroundTransparency = 1
-speedTrigger.Size = UDim2.new(1, 0, 1, 20)
-speedTrigger.Position = UDim2.new(0, 0, 0, -10)
-speedTrigger.Parent = speedTrack
-
--- 4. Слайдер радиуса (50 - 5000)
-local radiusCard = Instance.new("Frame")
-radiusCard.Size = UDim2.new(1, 0, 0, 60)
-radiusCard.BackgroundColor3 = THEME.CardBg
-radiusCard.BorderSizePixel = 0
-radiusCard.LayoutOrder = 4
-radiusCard.Parent = scrollContent
-
-local radiusCorner = Instance.new("UICorner")
-radiusCorner.CornerRadius = UDim.new(0, 10)
-radiusCorner.Parent = radiusCard
-
-local radiusTitle = Instance.new("TextLabel")
-radiusTitle.Text = "Радиус поиска"
-radiusTitle.Font = Enum.Font.GothamMedium
-radiusTitle.TextSize = 12
-radiusTitle.TextColor3 = THEME.TextPrimary
-radiusTitle.TextXAlignment = Enum.TextXAlignment.Left
-radiusTitle.Position = UDim2.new(0, 14, 0, 10)
-radiusTitle.Size = UDim2.new(0, 160, 0, 14)
-radiusTitle.BackgroundTransparency = 1
-radiusTitle.Parent = radiusCard
-
-local radiusIndicator = Instance.new("TextLabel")
-radiusIndicator.Text = tostring(CONFIG.Radius) .. " studs"
-radiusIndicator.Font = Enum.Font.GothamBold
-radiusIndicator.TextSize = 11
-radiusIndicator.TextColor3 = THEME.Accent
-radiusIndicator.TextXAlignment = Enum.TextXAlignment.Right
-radiusIndicator.Position = UDim2.new(1, -90, 0, 10)
-radiusIndicator.Size = UDim2.new(0, 76, 0, 14)
-radiusIndicator.BackgroundTransparency = 1
-radiusIndicator.Parent = radiusCard
-
-local radiusTrack = Instance.new("Frame")
-radiusTrack.Size = UDim2.new(1, -28, 0, 6)
-radiusTrack.Position = UDim2.new(0, 14, 0, 38)
-radiusTrack.BackgroundColor3 = THEME.Border
-radiusTrack.BorderSizePixel = 0
-radiusTrack.Parent = radiusCard
-
-local radiusTrackCorner = Instance.new("UICorner")
-radiusTrackCorner.CornerRadius = UDim.new(1, 0)
-radiusTrackCorner.Parent = radiusTrack
-
-local radiusFill = Instance.new("Frame")
-local defRadRatio = math.clamp((CONFIG.Radius - 50) / (5000 - 50), 0, 1)
-radiusFill.Size = UDim2.new(defRadRatio, 0, 1, 0)
-radiusFill.BackgroundColor3 = THEME.Accent
-radiusFill.BorderSizePixel = 0
-radiusFill.Parent = radiusTrack
-
-local radiusFillCorner = Instance.new("UICorner")
-radiusFillCorner.CornerRadius = UDim.new(1, 0)
-radiusFillCorner.Parent = radiusFill
-
-local radiusTrigger = Instance.new("TextButton")
-radiusTrigger.Text = ""
-radiusTrigger.BackgroundTransparency = 1
-radiusTrigger.Size = UDim2.new(1, 0, 1, 20)
-radiusTrigger.Position = UDim2.new(0, 0, 0, -10)
-radiusTrigger.Parent = radiusTrack
-
---------------------------------------------------------------------------------
--- 5. СЕКЦИЯ: РАСШИРЕННЫЙ СПИСОК ПРЕДМЕТОВ ПРОДАЖИ (SHIFTPLOX)
---------------------------------------------------------------------------------
-local merchCard = Instance.new("Frame")
-merchCard.Size = UDim2.new(1, 0, 0, 310)
-merchCard.BackgroundColor3 = THEME.CardBg
-merchCard.BorderSizePixel = 0
-merchCard.LayoutOrder = 5
-merchCard.Parent = scrollContent
-
-local merchCorner = Instance.new("UICorner")
-merchCorner.CornerRadius = UDim.new(0, 10)
-merchCorner.Parent = merchCard
-
-local merchHeader = Instance.new("Frame")
-merchHeader.Size = UDim2.new(1, 0, 0, 40)
-merchHeader.BackgroundTransparency = 1
-merchHeader.Parent = merchCard
-
-local merchIcon = Instance.new("ImageLabel")
-merchIcon.Size = UDim2.new(0, 18, 0, 18)
-merchIcon.Position = UDim2.new(0, 12, 0.5, -9)
-merchIcon.BackgroundTransparency = 1
-merchIcon.Image = ICONS.Merchant
-merchIcon.ImageColor3 = THEME.Warning
-merchIcon.Parent = merchHeader
-
-local merchTitle = Instance.new("TextLabel")
-merchTitle.Text = "Лимиты автопродажи (ShiftPlox)"
-merchTitle.Font = Enum.Font.GothamMedium
-merchTitle.TextSize = 13
-merchTitle.TextColor3 = THEME.TextPrimary
-merchTitle.TextXAlignment = Enum.TextXAlignment.Left
-merchTitle.Position = UDim2.new(0, 38, 0, 8)
-merchTitle.Size = UDim2.new(0, 200, 0, 16)
-merchTitle.BackgroundTransparency = 1
-merchTitle.Parent = merchHeader
-
-local merchDesc = Instance.new("TextLabel")
-merchDesc.Text = "Продажа при достижении лимита"
-merchDesc.Font = Enum.Font.Gotham
-merchDesc.TextSize = 10
-merchDesc.TextColor3 = THEME.TextSecondary
-merchDesc.TextXAlignment = Enum.TextXAlignment.Left
-merchDesc.Position = UDim2.new(0, 38, 0, 24)
-merchDesc.Size = UDim2.new(0, 200, 0, 14)
-merchDesc.BackgroundTransparency = 1
-merchDesc.Parent = merchHeader
-
-local checkListScroll = Instance.new("ScrollingFrame")
-checkListScroll.Size = UDim2.new(1, -20, 0, 255)
-checkListScroll.Position = UDim2.new(0, 10, 0, 44)
-checkListScroll.BackgroundColor3 = THEME.CardInner
-checkListScroll.BorderSizePixel = 0
-checkListScroll.ScrollBarThickness = 3
-checkListScroll.ScrollBarImageColor3 = THEME.Border
-checkListScroll.CanvasSize = UDim2.new(0, 0, 0, 480)
-checkListScroll.Parent = merchCard
-
-local checkListCorner = Instance.new("UICorner")
-checkListCorner.CornerRadius = UDim.new(0, 8)
-checkListCorner.Parent = checkListScroll
-
-local checkListLayout = Instance.new("UIListLayout")
-checkListLayout.SortOrder = Enum.SortOrder.LayoutOrder
-checkListLayout.Padding = UDim.new(0, 2)
-checkListLayout.Parent = checkListScroll
-
-local function createItemCheckRow(itemName: string, limitVal: number, order: number)
-    local row = Instance.new("Frame")
-    row.Size = UDim2.new(1, -4, 0, 34)
-    row.BackgroundTransparency = 1
-    row.LayoutOrder = order
-    row.Parent = checkListScroll
-
-    local boxBtn = Instance.new("TextButton")
-    boxBtn.Text = ""
-    boxBtn.AutoButtonColor = false
-    boxBtn.Size = UDim2.new(0, 18, 0, 18)
-    boxBtn.Position = UDim2.new(0, 10, 0.5, -9)
-    boxBtn.BackgroundColor3 = CONFIG.SellItems[itemName] and THEME.Accent or THEME.Border
-    boxBtn.BorderSizePixel = 0
-    boxBtn.Parent = row
-
-    local boxCorner = Instance.new("UICorner")
-    boxCorner.CornerRadius = UDim.new(0, 4)
-    boxCorner.Parent = boxBtn
-
-    local checkIcon = Instance.new("ImageLabel")
-    checkIcon.Size = UDim2.new(0, 14, 0, 14)
-    checkIcon.Position = UDim2.new(0.5, -7, 0.5, -7)
-    checkIcon.BackgroundTransparency = 1
-    checkIcon.Image = ICONS.Check
-    checkIcon.ImageColor3 = Color3.fromRGB(255, 255, 255)
-    checkIcon.Visible = CONFIG.SellItems[itemName]
-    checkIcon.Parent = boxBtn
-
-    local nameLabel = Instance.new("TextLabel")
-    nameLabel.Text = itemName
-    nameLabel.Font = Enum.Font.GothamMedium
-    nameLabel.TextSize = 11
-    nameLabel.TextColor3 = THEME.TextPrimary
-    nameLabel.TextXAlignment = Enum.TextXAlignment.Left
-    nameLabel.Position = UDim2.new(0, 36, 0, 0)
-    nameLabel.Size = UDim2.new(0, 160, 1, 0)
-    nameLabel.BackgroundTransparency = 1
-    nameLabel.Parent = row
-
-    local limitLabel = Instance.new("TextLabel")
-    limitLabel.Text = "Порог: " .. tostring(limitVal)
-    limitLabel.Font = Enum.Font.Gotham
-    limitLabel.TextSize = 10
-    limitLabel.TextColor3 = THEME.TextSecondary
-    limitLabel.TextXAlignment = Enum.TextXAlignment.Right
-    limitLabel.Position = UDim2.new(1, -80, 0, 0)
-    limitLabel.Size = UDim2.new(0, 70, 1, 0)
-    limitLabel.BackgroundTransparency = 1
-    limitLabel.Parent = row
-
-    connectOwned(boxBtn.MouseButton1Click, function()
-        CONFIG.SellItems[itemName] = not CONFIG.SellItems[itemName]
-        local isEnabled = CONFIG.SellItems[itemName]
-        Settings.requestSave()
-        checkIcon.Visible = isEnabled
-        TweenService:Create(boxBtn, TweenInfo.new(0.15), {
-            BackgroundColor3 = isEnabled and THEME.Accent or THEME.Border
-        }):Play()
-    end)
-end
-
--- Shared catalog drives the UI and inventory matching, including aliases.
-Sales.AddRow = function(itemName: string, threshold: number, order: number)
-    createItemCheckRow(itemName, threshold, order)
-    checkListScroll.CanvasSize = UDim2.fromOffset(0, #Sales.Order * 36)
-end
-for order, itemName in ipairs(Sales.Order) do Sales.AddRow(itemName, CONFIG.Limits[itemName], order) end
-
--- 6. Статус и индикаторы
-local statusCard = Instance.new("Frame")
-statusCard.Size = UDim2.new(1, 0, 0, 70)
-statusCard.BackgroundColor3 = THEME.CardBg
-statusCard.BorderSizePixel = 0
-statusCard.LayoutOrder = 6
-statusCard.Parent = scrollContent
-
-local statusCorner = Instance.new("UICorner")
-statusCorner.CornerRadius = UDim.new(0, 10)
-statusCorner.Parent = statusCard
-
-local statusIcon = Instance.new("ImageLabel")
-statusIcon.Size = UDim2.new(0, 18, 0, 18)
-statusIcon.Position = UDim2.new(0, 12, 0.18, 0)
-statusIcon.BackgroundTransparency = 1
-statusIcon.Image = ICONS.Sparkle
-statusIcon.ImageColor3 = THEME.Accent
-statusIcon.Parent = statusCard
-
-local statusLabel = Instance.new("TextLabel")
-statusLabel.Text = "Статус: Ожидание запуска"
-statusLabel.Font = Enum.Font.GothamMedium
-statusLabel.TextSize = 12
-statusLabel.TextColor3 = THEME.TextSecondary
-statusLabel.TextXAlignment = Enum.TextXAlignment.Left
-statusLabel.Position = UDim2.new(0, 38, 0, 14)
-statusLabel.Size = UDim2.new(1, -50, 0, 16)
-statusLabel.BackgroundTransparency = 1
-statusLabel.Parent = statusCard
-if Auth.SessionOnly then statusLabel.Text = "Ключ принят; допуск не сохранён на следующий запуск" end
-
-local statsSubLabel = Instance.new("TextLabel")
-statsSubLabel.Text = "Собрано: 0 | Продано партий: 0"
-statsSubLabel.Font = Enum.Font.Gotham
-statsSubLabel.TextSize = 11
-statsSubLabel.TextColor3 = THEME.TextSecondary
-statsSubLabel.TextXAlignment = Enum.TextXAlignment.Left
-statsSubLabel.Position = UDim2.new(0, 38, 0, 36)
-statsSubLabel.Size = UDim2.new(1, -50, 0, 16)
-statsSubLabel.BackgroundTransparency = 1
-statsSubLabel.Parent = statusCard
-
---------------------------------------------------------------------------------
--- 6. УПРАВЛЕНИЕ UI И СЛАЙДЕРЫ
---------------------------------------------------------------------------------
-local function setFarmToggle(active: boolean)
-    local targetPos = active and UDim2.new(1, -19, 0.5, -8) or UDim2.new(0, 3, 0.5, -8)
-    local targetBg = active and THEME.Success or THEME.TrackOff
-
-    TweenService:Create(farmKnob, TweenInfo.new(0.2, Enum.EasingStyle.Quad), { Position = targetPos }):Play()
-    TweenService:Create(farmSwitchBack, TweenInfo.new(0.2, Enum.EasingStyle.Quad), { BackgroundColor3 = targetBg }):Play()
-end
-
+local ui: any=nil
+local statusLabel: any=nil
+local statsSubLabel: any=nil
+local diagnosticLabel: any=nil
+local diagnostic = {Mode="Full",Failed=false,Waiting=false,SellRequested=false}
 local function restoreCollisions()
     isFlying = false
 
@@ -1237,103 +1508,33 @@ local function restoreCollisions()
     end
 end
 
-connectOwned(farmSwitchBack.MouseButton1Click, function()
-    Farm.UserRevision += 1
-    print("[YBA Farm] User toggle=" .. tostring(not CONFIG.Enabled) .. " revision=" .. Farm.UserRevision)
-    CONFIG.Enabled = not CONFIG.Enabled
-    setFarmToggle(CONFIG.Enabled)
-    if not CONFIG.Enabled then
-        statusLabel.Text = "Статус: Отключен"
-        statusLabel.TextColor3 = THEME.TextSecondary
-        restoreCollisions()
-    end
-end)
-
--- Слайдер скорости
-local isSpeedMoving = false
-local function handleSpeed(frac: number)
-    frac = math.clamp(frac, 0, 1)
-    TweenService:Create(speedFill, TweenInfo.new(0.04), { Size = UDim2.new(frac, 0, 1, 0) }):Play()
-    local val = math.floor(20 + frac * (350 - 20))
-    CONFIG.Speed = val
-    speedIndicator.Text = tostring(val) .. " studs/s"
-    Settings.requestSave()
+local function setFarmToggle(active: boolean)
+    if ui then ui.SetEnabled(active) end
 end
-
-connectOwned(speedTrigger.InputBegan, function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-        isSpeedMoving = true
-        handleSpeed((input.Position.X - speedTrack.AbsolutePosition.X) / speedTrack.AbsoluteSize.X)
-    end
-end)
-
--- Слайдер радиуса
-local isRadiusMoving = false
-local function handleRadius(frac: number)
-    frac = math.clamp(frac, 0, 1)
-    TweenService:Create(radiusFill, TweenInfo.new(0.04), { Size = UDim2.new(frac, 0, 1, 0) }):Play()
-    local val = math.floor(50 + frac * (5000 - 50))
-    CONFIG.Radius = val
-    radiusIndicator.Text = tostring(val) .. " studs"
-    Settings.requestSave()
-end
-
-connectOwned(radiusTrigger.InputBegan, function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-        isRadiusMoving = true
-        handleRadius((input.Position.X - radiusTrack.AbsolutePosition.X) / radiusTrack.AbsoluteSize.X)
-    end
-end)
-
-connectOwned(UserInputService.InputEnded, function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-        isSpeedMoving = false
-        isRadiusMoving = false
-    end
-end)
-
-connectOwned(UserInputService.InputChanged, function(input)
-    if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
-        if isSpeedMoving then
-            handleSpeed((input.Position.X - speedTrack.AbsolutePosition.X) / speedTrack.AbsoluteSize.X)
-        elseif isRadiusMoving then
-            handleRadius((input.Position.X - radiusTrack.AbsolutePosition.X) / radiusTrack.AbsoluteSize.X)
+local selectMerchantMode: any=nil
+ui=buildCollectorUI({AuthSessionOnly=Auth.SessionOnly,OnClose=function() runtime.Stop() end,
+    OnEnabled=function(value: boolean)
+        if CONFIG.Enabled==value then setFarmToggle(value);return end
+        Farm.UserRevision+=1
+        print("[YBA Farm] User toggle="..tostring(value).." revision="..Farm.UserRevision)
+        CONFIG.Enabled=value;setFarmToggle(value)
+        if not value then
+            statusLabel.Text="Статус: Отключен";statusLabel.TextColor3=THEME.TextSecondary;restoreCollisions()
         end
-    end
-end)
-
-local diagnostic = {Mode = "Full", Failed = false, Waiting = false, SellRequested = false}
-local diagnosticCard = Instance.new("Frame")
-diagnosticCard.Name = "MerchantDiagnostics"
-diagnosticCard.Size = UDim2.new(1, 0, 0, 194)
-diagnosticCard.BackgroundColor3 = THEME.CardBg
-diagnosticCard.LayoutOrder = 7
-diagnosticCard.Parent = scrollContent
-local diagnosticLabel = Instance.new("TextLabel")
-diagnosticLabel.Size = UDim2.new(1, -16, 0, 46)
-diagnosticLabel.Position = UDim2.fromOffset(8, 4)
-diagnosticLabel.BackgroundTransparency = 1
-diagnosticLabel.TextColor3 = THEME.TextPrimary
-diagnosticLabel.TextSize = 11
-diagnosticLabel.TextWrapped = true
-diagnosticLabel.Text = "Полная автопродажа без настройки координат. Выберите режим, закройте F9 и включите автофарм."
-diagnosticLabel.Parent = diagnosticCard
-local function merchantModeButton(text: string, x: number, y: number, width: number, color: Color3): TextButton
-    local button = Instance.new("TextButton")
-    button.Size = UDim2.new(width, -12, 0, 38)
-    button.Position = UDim2.new(x, 8, 0, y)
-    button.Text = text
-    button.TextSize = 11
-    button.TextWrapped = true
-    button.BackgroundColor3 = color
-    button.Parent = diagnosticCard
-    return button
-end
-local fullSaleButton = merchantModeButton("Полная автопродажа", 0, 56, 0.5, THEME.Success)
-local firstClickButton = merchantModeButton("Проверка первого клика", 0.5, 56, 0.5, THEME.Accent)
-local compareInputButton = merchantModeButton("Сравнить ввод (диагностика)", 0, 102, 1, THEME.Accent)
-local stopSaleButton = merchantModeButton("Остановить попытку", 0, 146, 1, THEME.Warning)
-local function selectMerchantMode(mode: string)
+    end,
+    OnDiagnostic=function(mode: string)
+        if mode~="Stop" then selectMerchantMode(mode);return end
+        Farm.UserRevision+=1;diagnostic.Failed=true;CONFIG.Enabled=false;setFarmToggle(false)
+        print("[YBA Farm] User requested stop revision="..Farm.UserRevision)
+        statusLabel.Text="Статус: Попытка остановлена пользователем"
+    end})
+runtime.UI=ui
+local screenGui=ui.Gui
+runtime.RootGui=screenGui
+statusLabel,statsSubLabel,diagnosticLabel=ui.StatusLabel,ui.StatsLabel,ui.DiagnosticLabel
+if Auth.SessionOnly then statusLabel.Text="Ключ принят; допуск не сохранён на следующий запуск" end
+Sales.AddRow=function(name: string,limit: number,order: number) ui.AddSaleRow(name,limit,order) end
+selectMerchantMode=function(mode: string)
     if CONFIG.Enabled then
         diagnosticLabel.Text = "Сначала выключите автофарм, затем выберите режим продажи."
         return
@@ -1349,18 +1550,7 @@ local function selectMerchantMode(mode: string)
         or "Проверка: только первый клик, затем штатная отмена без проверки текста Deal. Включите автофарм."
     print("[YBA Debug] Merchant mode selected=" .. mode)
 end
-connectOwned(compareInputButton.MouseButton1Click, function() selectMerchantMode("Compare") end)
-connectOwned(fullSaleButton.MouseButton1Click, function() selectMerchantMode("Full") end)
-connectOwned(firstClickButton.MouseButton1Click, function() selectMerchantMode("FirstClick") end)
-connectOwned(stopSaleButton.MouseButton1Click, function()
-    Farm.UserRevision += 1
-    print("[YBA Farm] User requested stop revision=" .. Farm.UserRevision)
-    diagnostic.Failed = true
-    CONFIG.Enabled = false
-    setFarmToggle(false)
-    statusLabel.Text = "Статус: Попытка остановлена пользователем"
-end)
-scrollContent.CanvasSize = UDim2.fromOffset(0, 966)
+
 Settings.requestSave()
 
 --------------------------------------------------------------------------------
@@ -1714,6 +1904,7 @@ runtime.Stop = function()
     removeStealthPlatform()
     if not runtime.MerchantBlocked then restoreCollisions() end
     if character then setCharacterClientInvisibility(character, false) end
+    if runtime.UI then runtime.UI.Stop();runtime.UI=nil end
     screenGui:Destroy()
 end
 
@@ -1823,6 +2014,7 @@ function Farm.setState(state: string, reason: string?)
         print("[YBA Farm] " .. Farm.State .. " -> " .. state .. (reason and (" reason=" .. reason) or ""))
         Farm.State = state
     end
+    if runtime.UI then runtime.UI.RefreshOperation() end
 end
 function Farm.normalize(name: string): string
     return string.lower(name):gsub("[^%a]", "")
@@ -2572,13 +2764,12 @@ local function dispatchMerchantMouseClick(option: GuiObject, canContinue: () -> 
 end
 
 local function activateMerchantOption(option: GuiObject, canContinue: () -> boolean): boolean
-    local menuVisible = mainFrame.Visible
+    local resumeMenu=ui.SuspendForMerchant()
     local function finish()
         if runtime.MouseCleanup then pcall(runtime.MouseCleanup) end
-        if mainFrame.Parent then mainFrame.Visible = menuVisible end
+        resumeMenu()
     end
     runtime.ClickCleanup = finish
-    mainFrame.Visible = false
     local ok, result = xpcall(function(): boolean
         if not waitMerchantFrames(2, canContinue) then return false end
         return dispatchMerchantMouseClick(option, canContinue)

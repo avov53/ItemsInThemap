@@ -25,7 +25,7 @@ local localPlayer = Players.LocalPlayer
 --------------------------------------------------------------------------------
 -- 2. КОНФИГУРАЦИЯ И СТАТИСТИКА
 --------------------------------------------------------------------------------
-local VERSION = "collector-halloween-2026-10-27.28"
+local VERSION = "collector-halloween-2026-10-28.29"
 local sharedEnvironment = (typeof(getgenv) == "function" and getgenv()) or _G
 local previousRuntime = sharedEnvironment.YBACollectorRuntime
 if previousRuntime and typeof(previousRuntime.Stop) == "function" then pcall(previousRuntime.Stop) end
@@ -53,6 +53,7 @@ local CONFIG = {
     ScanDelay = 0.1,               -- Пауза при пустом поиске
     ArrivalTolerance = 3.5,        -- Допустимая погрешность прибытия
     AimCamera = true,              -- Поворачивать камеру только во время подбора
+    AntiAFK = true,                -- Поддерживать активность вне подбора и продажи
     MerchantCooldown = 3,         -- Кулдаун автопродажи в секундах при неудаче
 
     -- User-provided patrol order; no generated summit destinations.
@@ -119,6 +120,7 @@ function Settings.load()
     if Settings.finite(data.Radius) then CONFIG.Radius = math.clamp(math.floor(data.Radius), 50, 5000) end
     if Settings.finite(data.NearbyRadius) then CONFIG.NearbyRadius = math.clamp(math.floor(data.NearbyRadius), 10, 5000) end
     if typeof(data.AimCamera) == "boolean" then CONFIG.AimCamera = data.AimCamera end
+    if typeof(data.AntiAFK) == "boolean" then CONFIG.AntiAFK = data.AntiAFK end
     if typeof(data.UI)=="table" then
         local appearance=data.UI
         if appearance.Theme=="Halloween" or appearance.Theme=="Dark" or appearance.Theme=="Light" then CONFIG.UI.Theme=appearance.Theme end
@@ -163,7 +165,7 @@ function Settings.capture(): any
         savedAuth = {Key = auth.Key, Revision = auth.Revision}
     end
     return {Version = 1, Auth = savedAuth, UI = table.clone(CONFIG.UI), MoveMode = CONFIG.MoveMode, Speed = CONFIG.Speed, Radius = CONFIG.Radius,
-        NearbyRadius = CONFIG.NearbyRadius, AimCamera = CONFIG.AimCamera, SellItems = sellItems, Limits = limits}
+        NearbyRadius = CONFIG.NearbyRadius, AimCamera = CONFIG.AimCamera, AntiAFK = CONFIG.AntiAFK, SellItems = sellItems, Limits = limits}
 end
 function Settings.flush(): boolean
     if not Settings.Ready then return false end
@@ -948,6 +950,17 @@ local cameraCard=stackCard(farm,"Camera",70,5)
 text(cameraCard,"Камера при подборе",16,12,320,20,12,Theme.Text,true)
 text(cameraCard,"Направлять взгляд на предмет",16,37,340,16,10,Theme.Secondary)
 switch(cameraCard,410,23,State.AimCamera,function(v) State.AimCamera=v;CONFIG.AimCamera=v;Settings.requestSave();setStatus("Камера при подборе: "..(v and "включена" or "выключена")) end)
+local antiAFKCard=stackCard(farm,"AntiAFK",70,6)
+text(antiAFKCard,"Anti-AFK",16,12,320,20,12,Theme.Text,true)
+text(antiAFKCard,"Активность вне подбора и диалога",16,37,340,16,10,Theme.Secondary)
+switch(antiAFKCard,410,23,CONFIG.AntiAFK,function(v)
+    CONFIG.AntiAFK=v
+    if not v then
+        runtime.AntiAFKPending=false
+        if runtime.AntiAFKRelease then runtime.AntiAFKRelease() end
+    end
+    Settings.requestSave();setStatus("Anti-AFK: "..(v and "включён" or "выключен"))
+end)
 
 local sales=page("Автопродажа")
 local searchCard=make("Frame",{Name="Search",Size=UDim2.new(1,-6,0,48),BackgroundTransparency=1,LayoutOrder=1},sales)
@@ -1553,6 +1566,56 @@ end
 
 Settings.requestSave()
 
+-- Independent idle handler: never sends input during pickup or merchant work.
+-- Idled repeats while idle, so deferred requests can wait for a safe interval.
+do
+    local virtualUser: any=nil
+    local reported=false
+    connectOwned(localPlayer.Idled,function()
+        if runtime.Running and CONFIG.AntiAFK then runtime.AntiAFKPending=true end
+    end)
+    runtime.AntiAFKThread=task.spawn(function()
+        while runtime.Running do
+            task.wait(1)
+            if not runtime.Running then break end
+            if not CONFIG.AntiAFK then runtime.AntiAFKPending=false;continue end
+            if not runtime.AntiAFKPending then continue end
+            if Farm.State=="Selling" or Farm.State=="Collect" or runtime.MerchantBlocked
+                or runtime.MerchantHold or runtime.ClickCleanup or runtime.PickupCleanup
+                or runtime.PromptRelease or UserInputService:GetFocusedTextBox() then continue end
+            local character=localPlayer.Character
+            local humanoid=character and character:FindFirstChildOfClass("Humanoid")
+            local camera=Workspace.CurrentCamera
+            if not humanoid or humanoid.Health<=0 or not camera then continue end
+            runtime.AntiAFKPending=false
+            local released=false
+            local function release()
+                if released then return end
+                released=true
+                if virtualUser then
+                    local ok,err=pcall(function() virtualUser:Button2Up(Vector2.zero,camera.CFrame) end)
+                    if not ok and not reported then reported=true;warn("[YBA Anti-AFK] Release failed: "..tostring(err)) end
+                end
+                runtime.AntiAFKRelease=nil
+            end
+            local ok,err=xpcall(function()
+                virtualUser=virtualUser or game:GetService("VirtualUser")
+                runtime.AntiAFKRelease=release
+                virtualUser:CaptureController()
+                virtualUser:Button2Down(Vector2.zero,camera.CFrame)
+                -- Release in the same turn: no held input can overlap a new transaction.
+                release()
+            end,tracebackError)
+            release()
+            if ok then
+                print("[YBA Anti-AFK] Idle input sent; timer reset requires in-game verification")
+            elseif not reported then
+                reported=true;warn("[YBA Anti-AFK] Input unavailable: "..tostring(err))
+            end
+        end
+    end)
+end
+
 --------------------------------------------------------------------------------
 -- 7. КАРДИНАЛЬНЫЙ NOCLIP
 --------------------------------------------------------------------------------
@@ -1882,6 +1945,9 @@ runtime.Stop = function()
     Settings.flush()
     runtime.Running = false
     CONFIG.Enabled = false
+    runtime.AntiAFKPending=false
+    if runtime.AntiAFKRelease then pcall(runtime.AntiAFKRelease) end
+    if runtime.AntiAFKThread then pcall(task.cancel,runtime.AntiAFKThread);runtime.AntiAFKThread=nil end
     if runtime.PickupCleanup then pcall(runtime.PickupCleanup) end
     if runtime.PromptRelease then pcall(runtime.PromptRelease) end
     if Farm.stopIndex then Farm.stopIndex() end
